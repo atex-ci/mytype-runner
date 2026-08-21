@@ -29,7 +29,31 @@ jobs:
           git config --global http.sslverify false
           git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
-          
+
+      # .nvmrc is the source of truth for the Node version, floored at the oldest Node
+      # LTS we are willing to build on. Branches predating the Node 24 standardisation
+      # still declare v20, whose last release was 2026-03-24 and which no longer gets
+      # security patches - honouring that literally would DOWNGRADE them from the v22
+      # they build on today. This floor is policy, not a stopgap: we never build on an
+      # end-of-life Node. Raise MIN_NODE when the floor itself reaches EOL (22: ~2027-04).
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "resolved Node $resolved (.nvmrc requested '${want:-none}', floor $MIN_NODE)"
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        name: Install node
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
       - uses: pnpm/action-setup@v4
         name: Install pnpm
         id: pnpm-install
