@@ -29,7 +29,13 @@ jobs:
           git config --global http.sslverify false
           git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
-          
+
+      # After the clone, so .nvmrc exists. Before pnpm, so pnpm runs on that Node.
+      - uses: actions/setup-node@v4
+        name: Install node
+        with:
+          node-version-file: .nvmrc
+
       - uses: pnpm/action-setup@v4
         name: Install pnpm
         id: pnpm-install

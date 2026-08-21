@@ -26,11 +26,11 @@ jobs:
           git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
 
-      # Setup Node.js
+      # Setup Node.js - the version comes from the cloned repo's .nvmrc
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: .nvmrc
 
       # Setup Java 17 for SonarQube Scanner
       - name: Setup Java
