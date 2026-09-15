@@ -22,7 +22,7 @@ on:
         type: string
 
 run-name: >
-  sonar-scan-with-coverage · ${{ github.event.inputs.GIT_BRANCH }} → ${{ github.event.inputs.PROJECT_KEY }}
+  sonar-scan-with-coverage · ${{ github.event.inputs.GIT_BRANCH }}
   
 jobs:
   sonarqube:
