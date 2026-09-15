@@ -15,9 +15,14 @@ on:
         description: 'Sonarqube Project Key'     
         required: true
         default: 'mytype'
+      SONAR_KEY:
+        description: 'Name of the repository secret holding the SonarQube token'
+        required: true
+        default: 'SONAR_TOKEN'
+        type: string
 
 run-name: >
-  sonar-scan-with-coverage · ${{ github.event.inputs.GIT_BRANCH }}
+  sonar-scan-with-coverage · ${{ github.event.inputs.GIT_BRANCH }} → ${{ github.event.inputs.PROJECT_KEY }}
   
 jobs:
   sonarqube:
@@ -378,12 +383,12 @@ jobs:
         if: steps.check-coverage.outputs.has_coverage == 'true'
         uses: sonarsource/sonarqube-scan-action@master
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           # TODO: Temporarily disable coverage check
           SONAR_SCANNER_OPTS: >
-            -Dsonar.projectKey=mytype
-            -Dsonar.projectName=mytype
+            -Dsonar.projectKey=${{ github.event.inputs.PROJECT_KEY }}
+            -Dsonar.projectName=${{ github.event.inputs.PROJECT_KEY }}
             -Dsonar.javascript.lcov.reportPaths=**/coverage/lcov.info
             -Dsonar.typescript.internal.maxNodeMemory=4096
             -Dsonar.coverage.new_code.disabled=true
@@ -396,4 +401,4 @@ jobs:
       - uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
