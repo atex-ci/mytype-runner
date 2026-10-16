@@ -1,34 +1,45 @@
 name: test-suite-with-coverage
 
-on:  
+on:
   workflow_dispatch:
-    inputs:      
+    inputs:
       REPOSITORY:
         description: 'Repository to test (e.g. mytype)'
         default: 'mytype'
         type: string
       GIT_BRANCH:
-        description: 'branch to clone'     
+        description: 'branch to clone'
         required: true
         default: 'main'
+  # Also a job of sonar-scan.yml, which needs the coverage this run uploads.
+  workflow_call:
+    inputs:
+      REPOSITORY:
+        default: 'mytype'
+        type: string
+      GIT_BRANCH:
+        required: true
+        type: string
 
 run-name: >
-  test-suite-with-coverage · ${{ github.event.inputs.GIT_BRANCH }}
+  test-suite-with-coverage · ${{ inputs.GIT_BRANCH }}
   
 # The unit-test gate of the mytype deploy pipeline (shared/build/scripts/build/index.mjs dispatches
-# it and waits for it). The SonarQube analysis that used to close this workflow has its own,
-# sonar-scan.yml, run on demand and by the nightly sonar-fix action of mytype.
+# it and waits for it), and the first job of sonar-scan.yml, which analyses the coverage this run
+# uploads as the `coverage-lcov` artifact.
 jobs:
   tests:
     name: Test suite
     runs-on: ubuntu-latest
     permissions: read-all
+    env:
+      COVERAGE_EXCLUDE_PATHS: "*/shared/build/*|*/.nx/*|*/node_modules/.cache/nx/*"
     steps:
       - name: checkout
         run: |
           pwd
           git config --global http.sslverify false
-          git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+          git clone --branch "${{ inputs.GIT_BRANCH }}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
 
       # .nvmrc is the source of truth for the Node version, floored at the oldest Node
@@ -157,3 +168,99 @@ jobs:
           # Cleanup
           rm -f test_output.log
       
+
+      - name: Convert Istanbul to LCOV
+        run: |
+          npm install -g nyc
+          
+          echo "🔍 Looking for coverage files to convert..."
+          
+          # Find coverage files, excluding .nx cache and unwanted directories
+          COVERAGE_FILES=$(find . -name "coverage-final.json" -path "*/coverage/*" -not -path "*/.nx/*" -not -path "$COVERAGE_EXCLUDE_PATHS" 2>/dev/null || true)
+          
+          if [ -z "$COVERAGE_FILES" ]; then
+            echo "ℹ️ No coverage-final.json files found, checking for other coverage formats..."
+            find . -name "coverage" -type d -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" -exec sh -c 'echo "📁 $1:"; ls -la "$1"' _ {} \;
+          else
+            echo "$COVERAGE_FILES" | while read -r coverage_file; do
+              # Extract the project directory (parent of coverage directory)
+              project_dir=$(dirname "$(dirname "$coverage_file")")
+              echo "🔄 Converting $project_dir..."
+              
+              if cd "$project_dir" 2>/dev/null; then
+                if [ -f "coverage/coverage-final.json" ]; then
+                  mkdir -p .nyc_output
+                  cp coverage/coverage-final.json .nyc_output/out.json
+                  nyc report --reporter=lcov --report-dir=coverage || echo "⚠️ Failed to convert $project_dir"
+                else
+                  echo "⚠️ coverage-final.json not found in $project_dir/coverage"
+                fi
+                cd - > /dev/null
+              else
+                echo "❌ Cannot access directory $project_dir"
+              fi
+            done
+          fi
+          
+          # Check what lcov files we have
+          echo "📋 Final LCOV files:"
+          find . -name "lcov.info" -type f -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" -exec sh -c 'echo "✅ $1 ($(wc -l < "$1") lines)"' _ {} \; || echo "❌ No lcov.info files found"
+
+      # Wait for security audit
+
+      - name: Coverage Report Summary
+        run: |
+          echo "📊 Coverage directories summary before SonarQube scan:"
+          echo "==============================================="
+          
+          # Find coverage directories, excluding unwanted ones
+          COVERAGE_DIRS=$(find . -name "coverage" -type d -not -path "$COVERAGE_EXCLUDE_PATHS" -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" | sort)
+          
+          TOTAL_DIRS=$(echo "$COVERAGE_DIRS" | wc -l)
+          
+          if [ -z "$COVERAGE_DIRS" ]; then
+            echo "❌ No coverage directories found"
+          else
+            echo "Found $TOTAL_DIRS coverage directories:"
+            
+            for coverage_dir in $COVERAGE_DIRS; do
+              PROJECT_NAME=$(dirname "$coverage_dir" | sed 's|^\./||')
+              FILE_COUNT=$(find "$coverage_dir" -type f | wc -l)
+              DIR_SIZE=$(du -sh "$coverage_dir" 2>/dev/null | cut -f1 || echo "N/A")
+              
+              echo "  📁 $PROJECT_NAME/coverage:"
+              echo "    - Files: $FILE_COUNT"
+              echo "    - Size: $DIR_SIZE"
+              
+              # Check for specific important files
+              if [ -f "$coverage_dir/lcov.info" ]; then
+                LCOV_SIZE=$(wc -l < "$coverage_dir/lcov.info" 2>/dev/null || echo "0")
+                echo "    - lcov.info: ✅ ($LCOV_SIZE lines)"
+              else
+                echo "    - lcov.info: ❌ missing"
+              fi
+              
+              if [ -f "$coverage_dir/coverage-final.json" ]; then
+                echo "    - coverage-final.json: ✅"
+              else
+                echo "    - coverage-final.json: ❌ missing"
+              fi
+              
+              echo ""
+            done
+          fi
+          
+          echo "==============================================="
+
+
+      # For sonar-scan.yml: every lcov.info, at its path in the tree.
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            **/coverage/lcov.info
+            !**/node_modules/**
+            !**/.nx/**
+          if-no-files-found: warn
+          retention-days: 3
