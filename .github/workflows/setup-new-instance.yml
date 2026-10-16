@@ -43,6 +43,8 @@ jobs:
       ACTOR: ${{ github.event.inputs.ACTOR }}
       DEFAULT_AWS_ACCESS_KEY_ID: "${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"
       DEFAULT_AWS_SECRET_ACCESS_KEY: "${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
+      DEFAULT_AYRSHARE_API_KEY: ${{ secrets.AYRSHARE_API_KEY }}
+      DEFAULT_AYRSHARE_PRIVATE_KEY: ${{ secrets.AYRSHARE_PRIVATE_KEY }}
       GH_REPO_OWNER: ${{ github.repository_owner }} 
       GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
       

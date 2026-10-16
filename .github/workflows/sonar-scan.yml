@@ -1,0 +1,70 @@
+name: sonar-scan
+
+# The SonarQube analysis of mytype: dispatched on demand from mytype's "sonar scan" action and
+# nightly by its sonar-fix action, which then reads the issues through the SonarQube API
+# SonarQube Community Build keeps one state per project, so this is the only scan:
+# the project always describes the branch analysed here, main by default.
+
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch to analyse'
+        required: true
+        default: 'main'
+      PROJECT_KEY:
+        description: 'SonarQube project key'
+        required: true
+        default: 'mytype'
+      SONAR_KEY:
+        description: 'Name of the repository secret holding the SonarQube token'
+        required: true
+        default: 'SONAR_TOKEN'
+        type: string
+
+run-name: >
+  sonar-scan · ${{ github.event.inputs.GIT_BRANCH }}
+
+# Two analyses of the same project submitted at the same time are rejected by SonarQube
+# ("Date of analysis cannot be older than ..."); queue them.
+concurrency:
+  group: sonar-scan-${{ github.event.inputs.PROJECT_KEY }}
+  cancel-in-progress: false
+
+jobs:
+  sonarqube:
+    name: SonarQube scan
+    runs-on: ubuntu-latest
+    permissions: read-all
+    steps:
+      - name: checkout
+        run: |
+          git config --global http.sslverify false
+          git clone --depth 1 --branch "${{ github.event.inputs.GIT_BRANCH }}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+
+      - name: SQ cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: sonar-cache
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_SCANNER_OPTS: >
+            -Dsonar.projectKey=${{ github.event.inputs.PROJECT_KEY }}
+            -Dsonar.projectName=${{ github.event.inputs.PROJECT_KEY }}
+            -Dsonar.typescript.internal.maxNodeMemory=4096
+            -Dsonar.coverage.new_code.disabled=true
+            -Dsonar.coverage.overall.disabled=true
+            -Dsonar.inclusions=**/*.ts,**/*.tsx
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/coverage/**,**/*.spec.ts,**/*.test.ts,**/*.spec.tsx,**/*.test.tsx,**/__mocks__/**,**/apps/client/src/components/debug/**,**/shared/build/**,**/types.ts,**/advanced-prosemirror-history.ts,**/*.json,**/*.js
+            -Dsonar.test.inclusions=**/*.spec.ts,**/*.test.ts,**/*.spec.tsx,**/*.test.tsx
+
+      # Waits for SonarQube's compute engine: when this step is green the issues are readable.
+      - uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
