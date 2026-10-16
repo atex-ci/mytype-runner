@@ -16,11 +16,6 @@ on:
         description: 'SonarQube project key'
         required: true
         default: 'mytype'
-      SONAR_KEY:
-        description: 'Name of the repository secret holding the SonarQube token'
-        required: true
-        default: 'SONAR_TOKEN'
-        type: string
 
 run-name: >
   sonar-scan · ${{ github.event.inputs.GIT_BRANCH }}
@@ -51,7 +46,7 @@ jobs:
       - name: SonarQube Scan
         uses: sonarsource/sonarqube-scan-action@master
         env:
-          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_SCANNER_OPTS: >
             -Dsonar.projectKey=${{ github.event.inputs.PROJECT_KEY }}
@@ -67,4 +62,4 @@ jobs:
       - uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
-          SONAR_TOKEN: ${{ secrets[github.event.inputs.SONAR_KEY] }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
