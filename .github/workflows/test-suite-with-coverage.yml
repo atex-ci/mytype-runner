@@ -1,0 +1,159 @@
+name: test-suite-with-coverage
+
+on:  
+  workflow_dispatch:
+    inputs:      
+      REPOSITORY:
+        description: 'Repository to test (e.g. mytype)'
+        default: 'mytype'
+        type: string
+      GIT_BRANCH:
+        description: 'branch to clone'     
+        required: true
+        default: 'main'
+
+run-name: >
+  test-suite-with-coverage · ${{ github.event.inputs.GIT_BRANCH }}
+  
+# The unit-test gate of the mytype deploy pipeline (shared/build/scripts/build/index.mjs dispatches
+# it and waits for it). The SonarQube analysis that used to close this workflow has its own,
+# sonar-scan.yml, run on demand and by the nightly sonar-fix action of mytype (PMC-5315).
+jobs:
+  tests:
+    name: Test suite
+    runs-on: ubuntu-latest
+    permissions: read-all
+    steps:
+      - name: checkout
+        run: |
+          pwd
+          git config --global http.sslverify false
+          git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+          ls -la
+
+      # .nvmrc is the source of truth for the Node version, floored at the oldest Node
+      # LTS we are willing to build on. Branches predating the Node 24 standardisation
+      # still declare v20, whose last release was 2026-03-24 and which no longer gets
+      # security patches - honouring that literally would DOWNGRADE them from the v22
+      # they build on today. This floor is policy, not a stopgap: we never build on an
+      # end-of-life Node. Raise MIN_NODE when the floor itself reaches EOL (22: ~2027-04).
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "resolved Node $resolved (.nvmrc requested '${want:-none}', floor $MIN_NODE)"
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        name: Install node
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      # Setup pnpm
+      - uses: pnpm/action-setup@v4
+        name: Install pnpm
+        id: pnpm-install
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+      
+      - name: Restore cached pnpm dependencies
+        id: cache-dependencies-restore
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+      
+      - name: Install dependencies
+        run: pnpm install
+      
+      # Security audit (async)
+      - name: Start client build (async)
+        run: pnpm --filter client build &
+        continue-on-error: true
+      - name: Delete Previous Cache
+        if: ${{ steps.cache-dependencies-restore.outputs.cache-hit }}
+        continue-on-error: true
+        run: |
+          gh extension install actions/gh-actions-cache
+          gh actions-cache delete "${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}" --confirm
+        env:
+          GH_TOKEN: ${{ secrets.GH_PASSWORD }}          
+      
+      - name: Cache pnpm dependencies
+        id: cache-dependencies-save
+        uses: actions/cache/save@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          
+      - uses: nrwl/nx-set-shas@v3
+      
+      - name: Get Current Job Log URL
+        id: jobs
+        run: |
+          JOBS_URL="https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
+          JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
+          echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
+
+      - name: Modify nx.json to skip build dependencies for tests
+        run: |
+          # Backup original
+          cp nx.json nx.json.backup
+          
+          # Remove "build" from test target dependencies, keep only "^build"
+          jq '.targetDefaults.test.dependsOn = ["^build"]' nx.json > nx.json.tmp && mv nx.json.tmp nx.json
+          
+          echo "Modified nx.json test dependencies:"
+          jq '.targetDefaults.test.dependsOn' nx.json
+
+      - name: Run Tests
+        run: |
+          echo "🚀 Running tests with cache..."
+          
+          # Run tests and capture output
+          npx nx run-many --target=test --coverage --parallel 2>&1 | tee test_output.log
+          
+          # Check if there are failed tasks regardless of exit code
+          if grep -q "Failed tasks:" test_output.log; then
+            echo "❌ Some tests failed, analyzing which ones..."
+            
+            # Extract failed projects from the "Failed tasks:" section
+            FAILED_PROJECTS=$(grep -A 50 "Failed tasks:" test_output.log | grep "^- .*:test$" | sed 's/^- \(.*\):test$/\1/' | tr '\n' ',' | sed 's/,$//')
+            
+            if [ -n "$FAILED_PROJECTS" ]; then
+              echo "🔄 Failed projects: $FAILED_PROJECTS"
+              echo "🧹 Cleaning coverage directories for failed projects..."
+              
+              # Clean only coverage directories of failed projects
+              IFS=',' read -ra PROJECTS <<< "$FAILED_PROJECTS"
+              for project in "${PROJECTS[@]}"; do
+                find . -path "*/$project/coverage" -type d -exec rm -rf {} + 2>/dev/null || true
+              done
+              
+              echo "🔄 Retrying failed projects without cache..."
+              npx nx run-many --target=test --coverage --projects="$FAILED_PROJECTS" --skip-nx-cache
+            else
+              echo "⚠️ Could not identify failed projects, retrying all without cache..."
+              find . -name "coverage" -type d -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" -exec rm -rf {} + 2>/dev/null || true
+              npx nx run-many --target=test --coverage --parallel --skip-nx-cache
+            fi
+          else
+            echo "✅ All tests passed on first attempt"
+          fi
+          
+          # Cleanup
+          rm -f test_output.log
+      
