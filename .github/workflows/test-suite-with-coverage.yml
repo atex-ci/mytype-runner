@@ -31,7 +31,6 @@ jobs:
   tests:
     name: Test suite
     runs-on: ubuntu-latest
-    permissions: read-all
     env:
       COVERAGE_EXCLUDE_PATHS: "*/shared/build/*|*/.nx/*|*/node_modules/.cache/nx/*"
     steps:
