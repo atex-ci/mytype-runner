@@ -17,7 +17,7 @@ run-name: >
   
 # The unit-test gate of the mytype deploy pipeline (shared/build/scripts/build/index.mjs dispatches
 # it and waits for it). The SonarQube analysis that used to close this workflow has its own,
-# sonar-scan.yml, run on demand and by the nightly sonar-fix action of mytype (PMC-5315).
+# sonar-scan.yml, run on demand and by the nightly sonar-fix action of mytype.
 jobs:
   tests:
     name: Test suite

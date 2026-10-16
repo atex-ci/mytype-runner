@@ -2,7 +2,7 @@ name: sonar-scan
 
 # The SonarQube analysis of mytype: dispatched on demand from mytype's "sonar scan" action and
 # nightly by its sonar-fix action, which then reads the issues through the SonarQube API
-# (PMC-5315). SonarQube Community Build keeps one state per project, so this is the only scan:
+# SonarQube Community Build keeps one state per project, so this is the only scan:
 # the project always describes the branch analysed here, main by default.
 
 on:
