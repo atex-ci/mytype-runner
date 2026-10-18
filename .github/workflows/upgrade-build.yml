@@ -6,7 +6,7 @@ on:
       GIT_BRANCH:
         description: 'branch to clone'     
         required: true
-        default: 'PMC-3982-deploy-using-git'
+        default: 'main'
       ENVIRONMENT:
         description: 'deploy to'     
         required: true
