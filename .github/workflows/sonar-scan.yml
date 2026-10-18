@@ -242,8 +242,25 @@ jobs:
             -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/coverage/**,**/*.spec.ts,**/*.test.ts,**/*.spec.tsx,**/*.test.tsx,**/__mocks__/**,**/apps/client/src/components/debug/**,**/shared/build/**,**/types.ts,**/advanced-prosemirror-history.ts,**/*.json,**/*.js
             -Dsonar.test.inclusions=**/*.spec.ts,**/*.test.ts,**/*.spec.tsx,**/*.test.tsx
 
-      # Waits for SonarQube's compute engine: when this step is green the issues are readable.
-      - uses: sonarsource/sonarqube-quality-gate-action@master
+      # Waits for SonarQube's compute engine. A red gate is not a failure of this workflow: its issues
+      # are what mytype's sonar-fix reads next, and failing here made sonar-fix stop before reading
+      # them. The action sets quality-gate-status only once the analysis is processed, so an empty
+      # status (timeout, failed or canceled task) still fails the run below.
+      - name: quality gate
+        id: quality-gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        continue-on-error: true
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # When this step is green the issues are readable.
+      - name: the analysis was processed
+        env:
+          GATE: ${{ steps.quality-gate.outputs.quality-gate-status }}
+        run: |
+          if [ -z "$GATE" ]; then
+            echo "::error::SonarQube did not process the analysis (timeout, failed or canceled task)"
+            exit 1
+          fi
+          echo "Quality gate: $GATE" >> "$GITHUB_STEP_SUMMARY"
