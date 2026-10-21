@@ -45,6 +45,20 @@ jobs:
           git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
 
+      # The unit-test gate of a full build (shared/build/scripts/test-suite/dispatch.sh, awaited by the
+      # build script), started before this job's own setup instead of from the build script a minute
+      # later: with a warm Nx cache that minute was the wait for the tests. The run id reaches the build
+      # as TEST_SUITE_RUN_ID. A branch without the script (before PMC-5315) dispatches from the build.
+      - name: Start the test suite
+        id: test-suite
+        if: github.event.inputs.OPERATION == 'full' && hashFiles('shared/build/scripts/test-suite/dispatch.sh') != ''
+        env:
+          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
+        run: |
+          bash ./shared/build/scripts/test-suite/dispatch.sh
+          echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
+          rm test_suite_run_id.txt
+
       # .nvmrc is the source of truth for the Node version, floored at the oldest Node
       # LTS we are willing to build on. Branches predating the Node 24 standardisation
       # still declare v20, whose last release was 2026-03-24 and which no longer gets
@@ -108,16 +122,11 @@ jobs:
           
       - name: Install dependencies
         run: pnpm install
-      - name: Delete Previous Cache
-        if: ${{ steps.cache-dependencies-restore.outputs.cache-hit }}
-        continue-on-error: true
-        run: |
-          gh extension install actions/gh-actions-cache
-          gh actions-cache delete "${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}" --confirm
-        env:
-          GH_TOKEN: ${{ secrets.GH_PASSWORD }}          
+      # The key carries the lockfile hash, so a hit means the store is already uploaded: saving it again
+      # (and the former "Delete Previous Cache" before it) re-uploaded the same content on every run.
       - name: Cache pnpm dependencies
         id: cache-dependencies-save
+        if: steps.cache-dependencies-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v3
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -142,6 +151,8 @@ jobs:
       
       # export any variables needed for the build script before running it
       - name: BUILD
+        env:
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id }}
         run: |
           export GH_PASSWORD="${{ secrets.GH_PASSWORD }}"
           export DEFAULT_AWS_ACCESS_KEY_ID="${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"

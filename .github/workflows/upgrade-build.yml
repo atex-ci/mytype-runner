@@ -94,16 +94,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install
           
-      - name: Delete Previous Cache
-        if: ${{ steps.cache-dependencies-restore.outputs.cache-hit }}
-        continue-on-error: true
-        run: |
-          gh extension install actions/gh-actions-cache
-          gh actions-cache delete "${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}" --confirm
-        env:
-          GH_TOKEN: ${{ secrets.GH_PASSWORD }}          
+      # The key carries the lockfile hash, so a hit means the store is already uploaded: saving it again
+      # (and the former "Delete Previous Cache" before it) re-uploaded the same content on every run.
       - name: Cache pnpm dependencies
         id: cache-dependencies-save
+        if: steps.cache-dependencies-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v3
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
