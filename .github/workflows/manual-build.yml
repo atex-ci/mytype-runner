@@ -36,6 +36,9 @@ jobs:
       DEFAULT_AWS_ACCESS_KEY_ID: ${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}
       DEFAULT_AWS_SECRET_ACCESS_KEY: ${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}
       JIRA_AUTH_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
+      # Nx remote cache (self-hosted, read natively by Nx 23); the build script (boot.sh → build/index.mjs, zx) inherits them.
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
       
     steps:
       - name: checkout

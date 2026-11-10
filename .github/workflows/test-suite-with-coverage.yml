@@ -33,6 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COVERAGE_EXCLUDE_PATHS: "*/shared/build/*|*/.nx/*|*/node_modules/.cache/nx/*"
+      # Nx remote cache (self-hosted, read natively by Nx 23). sonar-scan.yml calls this workflow with
+      # `secrets: inherit`, so the token reaches it there too.
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
     steps:
       - name: checkout
         run: |
@@ -111,17 +115,6 @@ jobs:
           JOBS_URL="https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
           JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
-
-      - name: Modify nx.json to skip build dependencies for tests
-        run: |
-          # Backup original
-          cp nx.json nx.json.backup
-          
-          # Remove "build" from test target dependencies, keep only "^build"
-          jq '.targetDefaults.test.dependsOn = ["^build"]' nx.json > nx.json.tmp && mv nx.json.tmp nx.json
-          
-          echo "Modified nx.json test dependencies:"
-          jq '.targetDefaults.test.dependsOn' nx.json
 
       - name: Run Tests
         run: |
