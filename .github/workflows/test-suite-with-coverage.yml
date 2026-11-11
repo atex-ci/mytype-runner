@@ -31,6 +31,14 @@ jobs:
   tests:
     name: Test suite
     runs-on: ubuntu-latest
+    # The test run of a build that a newer push to the same branch replaced (manual-build.yml cancels
+    # that build, not the run it dispatched): the newer run cancels it. Only the dispatched gate, never
+    # main, and never a run of sonar-scan.yml (a called workflow's `github.workflow` is the caller's).
+    concurrency:
+      group: >-
+        test-suite-${{ github.workflow == 'test-suite-with-coverage' && inputs.GIT_BRANCH != 'main' &&
+        inputs.GIT_BRANCH || format('{0}-{1}', github.run_id, github.run_attempt) }}
+      cancel-in-progress: true
     env:
       COVERAGE_EXCLUDE_PATHS: "*/shared/build/*|*/.nx/*|*/node_modules/.cache/nx/*"
       # Nx remote cache (self-hosted, read natively by Nx 23). sonar-scan.yml calls this workflow with

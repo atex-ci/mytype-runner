@@ -24,6 +24,15 @@ on:
 run-name: >
   manual-build · ${{ github.event.inputs.GIT_BRANCH }}
 
+# A newer push to a branch replaces the build of its older one: the older commit would only be
+# tested and deployed to be overwritten minutes later. One group per branch, environment and
+# operation. A main build is never cancelled: each one gets a group of its own (its run id).
+concurrency:
+  group: >-
+    manual-build-${{ github.event.inputs.GIT_BRANCH == 'main' && github.run_id ||
+    format('{0}-{1}-{2}', github.event.inputs.GIT_BRANCH, github.event.inputs.ENVIRONMENT, github.event.inputs.OPERATION) }}
+  cancel-in-progress: true
+
 jobs:
   main:
     runs-on: ubuntu-latest
