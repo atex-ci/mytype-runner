@@ -11,6 +11,10 @@ on:
         description: 'branch to clone'
         required: true
         default: 'main'
+      GIT_SHA:
+        description: 'commit to test (default: the tip of the branch)'
+        required: false
+        default: ''
   # Also a job of sonar-scan.yml, which needs the coverage this run uploads.
   workflow_call:
     inputs:
@@ -19,6 +23,10 @@ on:
         type: string
       GIT_BRANCH:
         required: true
+        type: string
+      GIT_SHA:
+        required: false
+        default: ''
         type: string
 
 run-name: >
@@ -46,11 +54,23 @@ jobs:
       NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
       NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
     steps:
+      # The gate of a build tests the commit that build checked out (GIT_SHA, from dispatch.sh), which
+      # the branch may no longer hold: see the checkout of manual-build.yml.
       - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
           pwd
           git config --global http.sslverify false
-          git clone --branch "${{ inputs.GIT_BRANCH }}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
           ls -la
 
       # .nvmrc is the source of truth for the Node version, floored at the oldest Node
