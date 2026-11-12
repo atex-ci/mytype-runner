@@ -20,6 +20,10 @@ on:
           - full
           - deploy
           - upgrade
+      GIT_SHA:
+        description: 'commit to build (default: the tip of the branch)'
+        required: false
+        default: ''
 
 run-name: >
   manual-build · ${{ github.event.inputs.GIT_BRANCH }}
@@ -50,11 +54,25 @@ jobs:
       NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
       
     steps:
+      # A push build names its commit (GIT_SHA, from mytype's on-push.yml): it builds that commit even when
+      # the branch is gone by the time the runner starts, as when its pull request is merged seconds after
+      # the push. That build has already cancelled the branch's older one, so it must not fail on a missing
+      # branch. A commit no branch holds any more is still fetched: its pull request's ref keeps it.
       - name: checkout
+        env:
+          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ github.event.inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
           pwd
           git config --global http.sslverify false
-          git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
           ls -la
 
       # The unit-test gate of a full build (shared/build/scripts/test-suite/dispatch.sh, awaited by the
