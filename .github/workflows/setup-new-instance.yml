@@ -38,8 +38,8 @@ jobs:
       PEM_STAGING_EC2_AURORA_BROWSER: ${{ secrets.PEM_STAGING_EC2_AURORA_BROWSER }}
       AURORA_DEV_ADMIN_PASSWORD: ${{ secrets.AURORA_DEV_ADMIN_PASSWORD }}
       AURORA_STAGING_ADMIN_PASSWORD: ${{ secrets.AURORA_STAGING_ADMIN_PASSWORD }}
+      GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
       ENV_FILE_NAME: ${{ github.event.inputs.ENV_FILE_NAME }}
-      ENV_FILE_CONTENT: ${{ github.event.inputs.ENV_FILE_CONTENT }}
       ACTOR: ${{ github.event.inputs.ACTOR }}
       DEFAULT_AWS_ACCESS_KEY_ID: "${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"
       DEFAULT_AWS_SECRET_ACCESS_KEY: "${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
@@ -52,9 +52,9 @@ jobs:
       - name: checkout
         run: |
           pwd
-          echo "GIT_BRANCH is ${{ github.event.inputs.GIT_BRANCH}}"
+          echo "GIT_BRANCH is $GIT_BRANCH"
           git config --global http.sslverify false
-          git clone --branch "${{ github.event.inputs.GIT_BRANCH}}" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
+          git clone --branch "$GIT_BRANCH" "https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git" .
           ls -la
 
       # .nvmrc is the source of truth for the Node version, floored at the oldest Node
@@ -129,5 +129,18 @@ jobs:
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
           
       - name: BUILD
-        run: |            
-          ./shared/build/boot.sh "${{ github.event.inputs.GIT_BRANCH }}" "${{ steps.jobs.outputs.html_url }}" "${{ github.event.inputs.ENV_FILE_NAME }}" "${{ secrets.SALT }}" install
+        env:
+          JOB_URL: ${{ steps.jobs.outputs.html_url }}
+          SALT: ${{ secrets.SALT }}
+        run: |
+          ENV_FILE_CONTENT=$(jq -r '.inputs.ENV_FILE_CONTENT' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$ENV_FILE_CONTENT"
+          while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            value=${value%\"}
+            value=${value#\"}
+            if [[ -n "$value" && "$key" =~ (PASSWORD|SECRET|TOKEN|KEY|DSN|CLIENT_ID) ]]; then
+              echo "::add-mask::$value"
+            fi
+          done < <(printf '%s' "$ENV_FILE_CONTENT" | base64 --decode)
+          export ENV_FILE_CONTENT
+          ./shared/build/boot.sh "$GIT_BRANCH" "$JOB_URL" "$ENV_FILE_NAME" "$SALT" install
