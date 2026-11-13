@@ -38,8 +38,6 @@ jobs:
       PEM_STAGING_EC2_AURORA_BROWSER: ${{ secrets.PEM_STAGING_EC2_AURORA_BROWSER }}
       AURORA_DEV_ADMIN_PASSWORD: ${{ secrets.AURORA_DEV_ADMIN_PASSWORD }}
       AURORA_STAGING_ADMIN_PASSWORD: ${{ secrets.AURORA_STAGING_ADMIN_PASSWORD }}
-      # ENV_FILE_CONTENT is not here: GitHub prints every env: value in each step's log header, and this
-      # repository's logs are public. The BUILD step reads it from the event file (PMC-6167)
       GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
       ENV_FILE_NAME: ${{ github.event.inputs.ENV_FILE_NAME }}
       ACTOR: ${{ github.event.inputs.ACTOR }}
@@ -130,9 +128,6 @@ jobs:
           JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
           
-      # The env file (passwords included, base64 is no protection) is read from the event file, never
-      # through ${{ }} or env:, which GitHub prints in the log; its secret values are masked before
-      # anything can print them (PMC-6167)
       - name: BUILD
         env:
           JOB_URL: ${{ steps.jobs.outputs.html_url }}
