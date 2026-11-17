@@ -122,13 +122,14 @@ jobs:
             echo "file=$file"
             echo "target=$(sed -n 's/^TARGET=//p' "$file")"
             echo "region=$(sed -n 's/^AWS_REGION=//p' "$file")"
+            echo "role=$(sed -n 's/^AWS_ROLE_ARN=//p' "$file")"
           } >> "$GITHUB_OUTPUT"
 
       - name: AWS credentials (OIDC)
         if: steps.environment.outputs.target == 'ecs'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.CONTRIBUTOR_STAGING_AWS_ROLE_ARN }}
+          role-to-assume: ${{ steps.environment.outputs.role }}
           aws-region: ${{ steps.environment.outputs.region }}
 
       - name: Deploy
