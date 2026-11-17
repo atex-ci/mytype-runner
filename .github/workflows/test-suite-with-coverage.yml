@@ -121,10 +121,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install
       
-      # Security audit (async)
-      - name: Start client build (async)
-        run: pnpm --filter client build &
-        continue-on-error: true
       # The key carries the lockfile hash, so a hit means the store is already uploaded: saving it again
       # (and the former "Delete Previous Cache" before it) re-uploaded the same content on every run.
       - name: Cache pnpm dependencies
@@ -219,8 +215,6 @@ jobs:
           # Check what lcov files we have
           echo "📋 Final LCOV files:"
           find . -name "lcov.info" -type f -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" -exec sh -c 'echo "✅ $1 ($(wc -l < "$1") lines)"' _ {} \; || echo "❌ No lcov.info files found"
-
-      # Wait for security audit
 
       - name: Coverage Report Summary
         run: |
