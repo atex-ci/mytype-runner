@@ -24,17 +24,39 @@ on:
         description: 'commit to build (default: the tip of the branch)'
         required: false
         default: ''
+      TEST_SUITE_RUN_ID:
+        description: 'test suite run to await instead of dispatching one (full only)'
+        required: false
+        default: ''
+  # The MyType pipeline of a push (mytype.yml, dispatched by route.yml) runs this same build.
+  workflow_call:
+    inputs:
+      GIT_BRANCH:
+        type: string
+        required: true
+      ENVIRONMENT:
+        type: string
+        required: true
+      OPERATION:
+        type: string
+        required: true
+      GIT_SHA:
+        type: string
+        default: ''
+      TEST_SUITE_RUN_ID:
+        type: string
+        default: ''
 
 run-name: >
-  manual-build · ${{ github.event.inputs.GIT_BRANCH }}
+  manual-build · ${{ inputs.GIT_BRANCH }}
 
 # A newer push to a branch replaces the build of its older one: the older commit would only be
 # tested and deployed to be overwritten minutes later. One group per branch, environment and
 # operation. A main build is never cancelled: each one gets a group of its own (its run id).
 concurrency:
   group: >-
-    manual-build-${{ github.event.inputs.GIT_BRANCH == 'main' && github.run_id ||
-    format('{0}-{1}-{2}', github.event.inputs.GIT_BRANCH, github.event.inputs.ENVIRONMENT, github.event.inputs.OPERATION) }}
+    manual-build-${{ inputs.GIT_BRANCH == 'main' && github.run_id ||
+    format('{0}-{1}-{2}', inputs.GIT_BRANCH, inputs.ENVIRONMENT, inputs.OPERATION) }}
   cancel-in-progress: true
 
 jobs:
@@ -60,8 +82,8 @@ jobs:
       # branch. A commit no branch holds any more is still fetched: its pull request's ref keeps it.
       - name: checkout
         env:
-          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
-          GIT_SHA: ${{ github.event.inputs.GIT_SHA }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
           REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
           pwd
@@ -79,11 +101,14 @@ jobs:
       # build script), started before this job's own setup instead of from the build script a minute
       # later: with a warm Nx cache that minute was the wait for the tests. The run id reaches the build
       # as TEST_SUITE_RUN_ID. A branch without the script (before PMC-5315) dispatches from the build.
+      # A push's build awaits the suite its router already started (TEST_SUITE_RUN_ID input).
       - name: Start the test suite
         id: test-suite
-        if: github.event.inputs.OPERATION == 'full' && hashFiles('shared/build/scripts/test-suite/dispatch.sh') != ''
+        if: >-
+          inputs.OPERATION == 'full' && inputs.TEST_SUITE_RUN_ID == '' &&
+          hashFiles('shared/build/scripts/test-suite/dispatch.sh') != ''
         env:
-          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
         run: |
           bash ./shared/build/scripts/test-suite/dispatch.sh
           echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
@@ -167,7 +192,7 @@ jobs:
         id: jobs
         run: |
           JOBS_URL="https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
-          JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
+          JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}" or (.name | endswith(" / ${{ github.job }}"))) | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
 
       - name: ensure aws cli is present
@@ -182,10 +207,10 @@ jobs:
       # export any variables needed for the build script before running it
       - name: BUILD
         env:
-          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
         run: |
           export GH_PASSWORD="${{ secrets.GH_PASSWORD }}"
           export DEFAULT_AWS_ACCESS_KEY_ID="${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"
           export DEFAULT_AWS_SECRET_ACCESS_KEY="${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
           export JIRA_AUTH_TOKEN="${{ secrets.JIRA_AUTH_TOKEN }}"
-          ./shared/build/boot.sh "${{ github.event.inputs.GIT_BRANCH}}" "${{ steps.jobs.outputs.html_url }}" "${{ github.event.inputs.ENVIRONMENT }}" "${{ secrets.SALT }}" "${{ github.event.inputs.OPERATION }}"
+          ./shared/build/boot.sh "${{ inputs.GIT_BRANCH }}" "${{ steps.jobs.outputs.html_url }}" "${{ inputs.ENVIRONMENT }}" "${{ secrets.SALT }}" "${{ inputs.OPERATION }}"
