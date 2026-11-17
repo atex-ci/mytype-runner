@@ -32,7 +32,7 @@ run-name: >
   manual-build · ${{ github.event.inputs.GIT_BRANCH }}${{ github.event.inputs.OPERATION != 'full' &&
   format(' · {0} {1}', github.event.inputs.OPERATION, github.event.inputs.ENVIRONMENT) || '' }}
 
-# Deploys come first, and a dev build never takes more than its share of the runners (PMC-6646):
+# Deploys come first, and a dev build never takes more than its share of the runners:
 # - deploy / upgrade (multi-deploy, the deploy tool): a group of its own (its run id), never cancelled,
 #   never queued behind another build.
 # - full on a branch: one group per branch and environment, a newer push cancels the build in progress:
