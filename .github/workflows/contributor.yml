@@ -132,7 +132,18 @@ jobs:
           role-to-assume: ${{ steps.environment.outputs.role }}
           aws-region: ${{ steps.environment.outputs.region }}
 
+      # The latest release, as the server pipeline downloads it (ensureConvoxCli): the staged build context
+      # of the deploy needs a CLI that matches .dockerignore the corrected way (3.25+).
+      - name: Convox CLI
+        if: steps.environment.outputs.target == 'convox'
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          sudo install -m 755 convox /usr/local/bin/convox
+          rm convox
+          convox version
+
       - name: Deploy
         env:
           DEPLOY_ENV_FILE: ${{ steps.environment.outputs.file }}
+          CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
         run: node shared/build/scripts/products/deploy.mjs "$DEPLOY_ENV_FILE"
