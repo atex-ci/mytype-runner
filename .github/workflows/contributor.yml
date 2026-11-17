@@ -1,0 +1,137 @@
+name: contributor
+
+# The pipeline of the contributor portal (apps/contributor of atex-products/mytype). Dispatched by route.yml for a
+# push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
+# GIT_BRANCH, GIT_SHA, ENVIRONMENT). Gate (the push's test suite, else lint and test of the product), then
+# the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch to deploy'
+        required: true
+      GIT_SHA:
+        description: 'commit to deploy (default: the tip of the branch)'
+        required: false
+        default: ''
+      TEST_SUITE_RUN_ID:
+        description: 'test suite run of the push, awaited before the deploy (default: lint and test here)'
+        required: false
+        default: ''
+      ENVIRONMENT:
+        description: 'environment to deploy to'
+        type: choice
+        options:
+          - contributor-dev
+          - contributor-staging
+        default: contributor-dev
+
+# The deploy tool reads this title: contributor · <branch> · <environment> · <commit>
+run-name: >-
+  contributor · ${{ inputs.GIT_BRANCH }} · ${{ inputs.ENVIRONMENT || 'contributor-dev' }} · ${{ inputs.GIT_SHA }}
+
+# One deploy at a time per environment: a newer one replaces the older.
+concurrency:
+  group: contributor-${{ inputs.ENVIRONMENT || 'contributor-dev' }}
+  cancel-in-progress: true
+
+# id-token: the OIDC login to AWS (contributor-staging).
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: ${{ inputs.ENVIRONMENT || 'contributor-dev' }}
+      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
+    steps:
+      # Same checkout as route.yml: the commit, even when its branch is already gone.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git config --global http.sslverify false
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Quality gate
+        env:
+          TEST_SUITE_RUN_ID: ${{ inputs.TEST_SUITE_RUN_ID }}
+        run: |
+          if [ -n "$TEST_SUITE_RUN_ID" ]; then
+            bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"
+          else
+            pnpm exec nx run-many -t lint,test --projects=tag:product:contributor
+          fi
+
+      - name: Read the environment
+        id: environment
+        run: |
+          file="apps/contributor/deploy/$ENVIRONMENT.env"
+          if [ ! -f "$file" ]; then
+            echo "::error::$file does not exist on this branch"
+            exit 1
+          fi
+          {
+            echo "file=$file"
+            echo "target=$(sed -n 's/^TARGET=//p' "$file")"
+            echo "region=$(sed -n 's/^AWS_REGION=//p' "$file")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: AWS credentials (OIDC)
+        if: steps.environment.outputs.target == 'ecs'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CONTRIBUTOR_STAGING_AWS_ROLE_ARN }}
+          aws-region: ${{ steps.environment.outputs.region }}
+
+      - name: Deploy
+        env:
+          DEPLOY_ENV_FILE: ${{ steps.environment.outputs.file }}
+        run: node shared/build/scripts/products/deploy.mjs "$DEPLOY_ENV_FILE"
