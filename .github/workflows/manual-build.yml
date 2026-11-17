@@ -25,17 +25,28 @@ on:
         required: false
         default: ''
 
+# A full build is "manual-build · <branch>"; a deploy or an upgrade also names its operation and environment,
+# so that mytype's on-pr-closed.yml, which cancels the full builds of a closed pull request's branch by this
+# name, never matches a deploy.
 run-name: >
-  manual-build · ${{ github.event.inputs.GIT_BRANCH }}
+  manual-build · ${{ github.event.inputs.GIT_BRANCH }}${{ github.event.inputs.OPERATION != 'full' &&
+  format(' · {0} {1}', github.event.inputs.OPERATION, github.event.inputs.ENVIRONMENT) || '' }}
 
-# A newer push to a branch replaces the build of its older one: the older commit would only be
-# tested and deployed to be overwritten minutes later. One group per branch, environment and
-# operation. A main build is never cancelled: each one gets a group of its own (its run id).
+# Deploys come first, and a dev build never takes more than its share of the runners:
+# - deploy / upgrade (multi-deploy, the deploy tool): a group of its own (its run id), never cancelled,
+#   never queued behind another build.
+# - full on a branch: one group per branch and environment, a newer push cancels the build in progress:
+#   the older commit would only be tested and deployed to be overwritten minutes later.
+# - full on main: one group per environment, never cancelled once started; of the builds waiting behind
+#   it only the newest is kept (GitHub cancels a pending run when a newer one joins the group), and it
+#   holds every merge of the ones it replaced.
+# A build that is cancelled or fails cancels its test suite too ("Stop the test suite" below).
 concurrency:
   group: >-
-    manual-build-${{ github.event.inputs.GIT_BRANCH == 'main' && github.run_id ||
-    format('{0}-{1}-{2}', github.event.inputs.GIT_BRANCH, github.event.inputs.ENVIRONMENT, github.event.inputs.OPERATION) }}
-  cancel-in-progress: true
+    manual-build-${{ github.event.inputs.OPERATION == 'full' &&
+    format('full-{0}-{1}', github.event.inputs.GIT_BRANCH, github.event.inputs.ENVIRONMENT) ||
+    github.run_id }}
+  cancel-in-progress: ${{ github.event.inputs.GIT_BRANCH != 'main' }}
 
 jobs:
   main:
@@ -189,3 +200,13 @@ jobs:
           export DEFAULT_AWS_SECRET_ACCESS_KEY="${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
           export JIRA_AUTH_TOKEN="${{ secrets.JIRA_AUTH_TOKEN }}"
           ./shared/build/boot.sh "${{ github.event.inputs.GIT_BRANCH}}" "${{ steps.jobs.outputs.html_url }}" "${{ github.event.inputs.ENVIRONMENT }}" "${{ secrets.SALT }}" "${{ github.event.inputs.OPERATION }}"
+
+      # The test suite is a run of its own, which the cancellation of this build does not reach: a build
+      # replaced by a newer push, or one that failed before its tests ended, would leave it holding a
+      # runner for nothing. Its outcome no longer matters, so a run already completed is not an error.
+      - name: Stop the test suite
+        if: (failure() || cancelled()) && steps.test-suite.outputs.run-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PASSWORD }}
+          RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+        run: gh run cancel "$RUN_ID" -R "$GITHUB_REPOSITORY" || true
