@@ -1,0 +1,133 @@
+name: route
+
+# Every push to atex-products/mytype lands here (its on-push.yml). The router knows no product: it starts
+# the push's test suite once (Nx, cached: product agnostic) and dispatches the pipeline workflow named
+# after every product the push changes (<product>.yml), handing it the test suite's run id to gate on.
+# The products come from the Nx graph (shared/build/scripts/products/affected-products.mjs in mytype).
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'pushed branch'
+        required: true
+      GIT_SHA:
+        description: 'pushed commit (default: the tip of the branch)'
+        required: false
+        default: ''
+
+run-name: >
+  route · ${{ inputs.GIT_BRANCH }}
+
+# A newer push to a branch replaces the routing of its older one; a main push is never cancelled.
+concurrency:
+  group: route-${{ inputs.GIT_BRANCH == 'main' && github.run_id || inputs.GIT_BRANCH }}
+  cancel-in-progress: true
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    env:
+      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
+    steps:
+      # Same checkout as manual-build.yml: the pushed commit, even when its branch is already gone.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git config --global http.sslverify false
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
+
+      - name: Start the test suite
+        id: test-suite
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+        run: |
+          bash ./shared/build/scripts/test-suite/dispatch.sh
+          echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
+          rm test_suite_run_id.txt
+
+      # Same Node policy as manual-build.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # A branch that predates the product tags (PMC-6633) has no script: it builds as before, MyType only.
+      - name: Affected products
+        id: products
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+        run: |
+          script=shared/build/scripts/products/affected-products.mjs
+          if [ -f "$script" ]; then
+            list=$(node "$script")
+          else
+            echo "::notice::$script is not on this branch: it builds as before its product tags"
+            list='["mytype"]'
+          fi
+          echo "products: $list"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the product pipelines
+        env:
+          PRODUCTS: ${{ steps.products.outputs.list }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          products=$(echo "$PRODUCTS" | jq -r '.[]')
+          if [ -z "$products" ]; then
+            echo "::notice::the push changes no product: tests only"
+          fi
+          for product in $products; do
+            payload=$(jq -cn --arg branch "$GIT_BRANCH" --arg sha "$sha" --arg tests "$TEST_SUITE_RUN_ID" \
+              '{ref: "main", inputs: {GIT_BRANCH: $branch, GIT_SHA: $sha, TEST_SUITE_RUN_ID: $tests}}')
+            code=$(curl -s -o response.json -w '%{http_code}' -X POST \
+              -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_PASSWORD" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$product.yml/dispatches" \
+              -d "$payload")
+            case "$code" in
+              204|200) echo "::notice::$product pipeline dispatched" ;;
+              404) echo "::warning::product $product has no pipeline yet ($product.yml): not built" ;;
+              *) echo "dispatch of $product.yml answered $code: $(cat response.json)"; exit 1 ;;
+            esac
+          done
