@@ -1,7 +1,8 @@
 name: route
 
 # Every push to atex-products/mytype lands here (its on-push.yml). The router knows no product: it starts
-# the push's test suite once (Nx, cached: product agnostic) and dispatches the pipeline workflow named
+# the push's test suite once (Nx, cached: product agnostic), checks once that the commit message names its
+# Jira ticket, and dispatches the pipeline workflow named
 # after every product the push changes (<product>.yml), handing it the test suite's run id to gate on.
 # The products come from the Nx graph (shared/build/scripts/products/affected-products.mjs in mytype).
 on:
@@ -90,6 +91,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install
+
+      # The commit message starts with a ticket of the Jira filter JIRA_FILTER_ID in all.env (shared/build/tools/jira).
+      # A message without one fails the push before any product pipeline runs.
+      - name: Check the commit message
+        env:
+          JIRA_AUTH_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
+        run: |
+          source shared/build/env/all.env
+          pnpm --filter build build
+          node shared/build/dist/jira
 
       # A branch that predates the product tags (PMC-6633) has no script: it builds as before, MyType only.
       - name: Affected products
