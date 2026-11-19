@@ -41,9 +41,9 @@ jobs:
   tests:
     name: Test suite
     runs-on: ubuntu-latest
-    # The test run of a build that a newer push to the same branch replaced (manual-build.yml cancels
-    # that build, not the run it dispatched): the newer run cancels it. Only the dispatched gate, never
-    # main, and never a run of sonar-scan.yml (a called workflow's `github.workflow` is the caller's).
+    # The test run of a build that a newer push to the same branch replaced: the newer run cancels it
+    # (manual-build.yml also cancels it when its build is cancelled or fails). Only the dispatched gate,
+    # never main, and never a run of sonar-scan.yml (a called workflow's `github.workflow` is the caller's).
     concurrency:
       group: >-
         test-suite-${{ github.workflow == 'test-suite-with-coverage' && inputs.GIT_BRANCH != 'main' &&
@@ -123,10 +123,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install
       
-      # Security audit (async)
-      - name: Start client build (async)
-        run: pnpm --filter client build &
-        continue-on-error: true
       # The key carries the lockfile hash, so a hit means the store is already uploaded: saving it again
       # (and the former "Delete Previous Cache" before it) re-uploaded the same content on every run.
       - name: Cache pnpm dependencies
@@ -243,8 +239,6 @@ jobs:
           # Check what lcov files we have
           echo "📋 Final LCOV files:"
           find . -name "lcov.info" -type f -not -path "*/.nx/*" -not -path "*/node_modules/.cache/nx/*" -exec sh -c 'echo "✅ $1 ($(wc -l < "$1") lines)"' _ {} \; || echo "❌ No lcov.info files found"
-
-      # Wait for security audit
 
       - name: Coverage Report Summary
         run: |
