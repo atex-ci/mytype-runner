@@ -4,6 +4,8 @@ name: contributor
 # push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
 # GIT_BRANCH, GIT_SHA, ENVIRONMENT). Gate (the push's test suite, or one started here for a manual deploy), then
 # the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
+# A push deploys (to the default environment, contributor-dev) only on main; on any other branch the run is the
+# gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
 on:
   workflow_dispatch:
     inputs:
@@ -30,10 +32,16 @@ on:
 run-name: >-
   contributor · ${{ inputs.GIT_BRANCH }} · ${{ inputs.ENVIRONMENT || 'contributor-dev' }} · ${{ inputs.GIT_SHA }}
 
-# One deploy at a time per environment: a newer one replaces the older.
+# As manual-build.yml (PMC-6646):
+# - a manual deploy: a group of its own (its run id), never cancelled.
+# - a push to main: one group per environment, never cancelled once started, so two deploys to the same
+#   environment never run in parallel; of the ones waiting behind it only the newest is kept.
+# - a push to another branch (the gate alone): one group per branch, a newer push cancels the older one.
 concurrency:
-  group: contributor-${{ inputs.ENVIRONMENT || 'contributor-dev' }}
-  cancel-in-progress: true
+  group: >-
+    contributor-${{ inputs.TEST_SUITE_RUN_ID == '' && github.run_id ||
+    format('{0}-{1}', inputs.GIT_BRANCH, inputs.ENVIRONMENT || 'contributor-dev') }}
+  cancel-in-progress: ${{ inputs.TEST_SUITE_RUN_ID != '' && inputs.GIT_BRANCH != 'main' }}
 
 # No job has id-token: write but the ECS deploy: a step that has it can mint an OIDC token, and every step of a
 # job runs the branch's code (install scripts, deploy scripts).
@@ -114,9 +122,12 @@ jobs:
           RUN_ID: ${{ steps.test-suite.outputs.run-id }}
         run: gh run cancel "$RUN_ID" -R "$GITHUB_REPOSITORY" || true
 
+  # A push deploys only from main; a manual deploy from any branch.
   deploy-convox:
     needs: gate
-    if: needs.gate.outputs.target == 'convox'
+    if: >-
+      needs.gate.outputs.target == 'convox' &&
+      (inputs.TEST_SUITE_RUN_ID == '' || inputs.GIT_BRANCH == 'main')
     runs-on: ubuntu-latest
     env:
       GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
