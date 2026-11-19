@@ -24,11 +24,8 @@ on:
         required: false
         default: ''
       ENVIRONMENT:
-        description: 'environment to deploy to'
-        type: choice
-        options:
-          - contributor-dev
-          - contributor-staging
+        description: 'environment to deploy to: the name of an apps/contributor/deploy/<name>.env file'
+        type: string
         default: contributor-dev
       OPERATION:
         type: choice
@@ -113,6 +110,10 @@ jobs:
       - name: Read the environment
         id: environment
         run: |
+          if [[ ! "$ENVIRONMENT" =~ ^[a-z]([a-z0-9-]{0,39}[a-z0-9])$ ]]; then
+            echo "::error::'$ENVIRONMENT' is not an environment name"
+            exit 1
+          fi
           file="apps/contributor/deploy/$ENVIRONMENT.env"
           if [ ! -f "$file" ]; then
             echo "::error::$file does not exist on this branch"

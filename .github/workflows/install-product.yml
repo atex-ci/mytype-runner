@@ -1,0 +1,119 @@
+name: install-product
+
+# Installs a new environment of a product on a Convox rack (apps/<PRODUCT>/ of atex-products/mytype), for the
+# installer of the deploy tool. The logic is shared/build/scripts/products/install.mjs of GIT_BRANCH: it adds
+# apps/<PRODUCT>/deploy/<ENVIRONMENT>.env (ENV_FILE_CONTENT, base64, not secret), creates the Convox app, sets
+# VARIABLES (base64 of KEY=VALUE lines, secrets included), deploys once through deploy.mjs, writes the app's URL
+# into the file and commits that file to GIT_BRANCH. A failed run changed nothing in the repository and can be run
+# again: an app that exists on the rack is not created twice.
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch the environment file is committed to'
+        required: true
+        default: 'main'
+      PRODUCT:
+        description: 'product, as in apps/<product> (contributor)'
+        required: true
+      ENVIRONMENT:
+        description: 'name of the new environment, also the name of its Convox app'
+        required: true
+      ENV_FILE_CONTENT:
+        description: 'environment file, base64 (not secret)'
+        required: true
+      VARIABLES:
+        description: 'runtime variables of the app, base64 of KEY=VALUE lines (secret)'
+        required: true
+
+run-name: install · ${{ inputs.PRODUCT }} · ${{ inputs.ENVIRONMENT }} · ${{ inputs.GIT_BRANCH }}
+
+# Two installs of one environment never run together; none is cancelled once started.
+concurrency:
+  group: install-${{ inputs.PRODUCT }}-${{ inputs.ENVIRONMENT }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      # Same checkout as setup-new-instance.yml: the branch the file is pushed to, with the credential to push.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+
+      # Before anything else logs a value: the whole base64 and every value of every line. A masked value that
+      # is short (true, 1) is masked wherever it appears in the log.
+      - name: Mask the variables
+        env:
+          VARIABLES: ${{ inputs.VARIABLES }}
+        run: |
+          echo "::add-mask::$VARIABLES"
+          while IFS= read -r line || [ -n "$line" ]; do
+            line=${line%$'\r'}
+            value=${line#*=}
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+            fi
+          done < <(printf '%s' "$VARIABLES" | base64 --decode)
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # As contributor.yml: the latest release, the staged build context of the deploy needs 3.25+.
+      - name: Convox CLI
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          sudo install -m 755 convox /usr/local/bin/convox
+          rm convox
+          convox version
+
+      # The inputs reach the script through the environment, never through the shell line: the script checks
+      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env.
+      - name: Install
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          PRODUCT: ${{ inputs.PRODUCT }}
+          ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+          ENV_FILE_CONTENT: ${{ inputs.ENV_FILE_CONTENT }}
+          VARIABLES: ${{ inputs.VARIABLES }}
+          CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
+        run: node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
