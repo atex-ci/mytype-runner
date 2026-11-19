@@ -2,7 +2,7 @@ name: contributor
 
 # The pipeline of the contributor portal (apps/contributor of atex-products/mytype). Dispatched by route.yml for a
 # push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
-# GIT_BRANCH, GIT_SHA, ENVIRONMENT). Gate (the push's test suite, else lint and test of the product), then
+# GIT_BRANCH, GIT_SHA, ENVIRONMENT). Gate (the push's test suite, or one started here for a manual deploy), then
 # the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ on:
         required: false
         default: ''
       TEST_SUITE_RUN_ID:
-        description: 'test suite run of the push, awaited before the deploy (default: lint and test here)'
+        description: 'test suite run of the push, awaited before the deploy (default: a suite is started here)'
         required: false
         default: ''
       ENVIRONMENT:
@@ -65,6 +65,18 @@ jobs:
             git checkout -B "$GIT_BRANCH" "$GIT_SHA"
           fi
 
+      # A push arrives with the suite its router started (TEST_SUITE_RUN_ID). A manual deploy has no router run:
+      # it starts the suite itself, as manual-build.yml does, before its own setup.
+      - name: Start the test suite
+        id: test-suite
+        if: inputs.TEST_SUITE_RUN_ID == ''
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+        run: |
+          bash ./shared/build/scripts/test-suite/dispatch.sh
+          echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
+          rm test_suite_run_id.txt
+
       # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
       - name: Resolve Node version
         id: node-version
@@ -102,13 +114,8 @@ jobs:
 
       - name: Quality gate
         env:
-          TEST_SUITE_RUN_ID: ${{ inputs.TEST_SUITE_RUN_ID }}
-        run: |
-          if [ -n "$TEST_SUITE_RUN_ID" ]; then
-            bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"
-          else
-            pnpm exec nx run-many -t lint,test --projects=tag:product:contributor
-          fi
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
+        run: bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"
 
       - name: Read the environment
         id: environment
@@ -125,8 +132,10 @@ jobs:
             echo "role=$(sed -n 's/^AWS_ROLE_ARN=//p' "$file")"
           } >> "$GITHUB_OUTPUT"
 
+      # Only a manual deploy (the deploy tool) assumes the ECS role: a push always carries its router's
+      # TEST_SUITE_RUN_ID, and its default environment is the Convox dev one.
       - name: AWS credentials (OIDC)
-        if: steps.environment.outputs.target == 'ecs'
+        if: steps.environment.outputs.target == 'ecs' && inputs.TEST_SUITE_RUN_ID == ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ steps.environment.outputs.role }}
