@@ -59,6 +59,7 @@ jobs:
         run: |
           echo "::add-mask::$VARIABLES"
           while IFS= read -r line || [ -n "$line" ]; do
+            line=${line%$'\r'}
             value=${line#*=}
             if [ -n "$value" ]; then
               echo "::add-mask::$value"
