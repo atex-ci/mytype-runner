@@ -1,0 +1,32 @@
+name: mytype
+
+# The pipeline of the MyType product for a push, dispatched by route.yml when the push changes a project
+# tagged product:mytype: the full build, gated on the push's test suite, deployed to mytype-print-dev.
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch to build'
+        required: true
+      GIT_SHA:
+        description: 'commit to build (default: the tip of the branch)'
+        required: false
+        default: ''
+      TEST_SUITE_RUN_ID:
+        description: 'test suite run of the push, awaited before the deploy'
+        required: false
+        default: ''
+
+run-name: >
+  mytype · ${{ inputs.GIT_BRANCH }}
+
+jobs:
+  build:
+    uses: ./.github/workflows/manual-build.yml
+    with:
+      GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+      GIT_SHA: ${{ inputs.GIT_SHA }}
+      ENVIRONMENT: mytype-print-dev
+      OPERATION: full
+      TEST_SUITE_RUN_ID: ${{ inputs.TEST_SUITE_RUN_ID }}
+    secrets: inherit

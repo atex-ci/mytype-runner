@@ -24,13 +24,35 @@ on:
         description: 'commit to build (default: the tip of the branch)'
         required: false
         default: ''
+      TEST_SUITE_RUN_ID:
+        description: 'test suite run to await instead of dispatching one (full only)'
+        required: false
+        default: ''
+  # The MyType pipeline of a push (mytype.yml, dispatched by route.yml) runs this same build.
+  workflow_call:
+    inputs:
+      GIT_BRANCH:
+        type: string
+        required: true
+      ENVIRONMENT:
+        type: string
+        required: true
+      OPERATION:
+        type: string
+        required: true
+      GIT_SHA:
+        type: string
+        default: ''
+      TEST_SUITE_RUN_ID:
+        type: string
+        default: ''
 
 # A full build is "manual-build · <branch>"; a deploy or an upgrade also names its operation and environment,
 # so that mytype's on-pr-closed.yml, which cancels the full builds of a closed pull request's branch by this
 # name, never matches a deploy.
 run-name: >
-  manual-build · ${{ github.event.inputs.GIT_BRANCH }}${{ github.event.inputs.OPERATION != 'full' &&
-  format(' · {0} {1}', github.event.inputs.OPERATION, github.event.inputs.ENVIRONMENT) || '' }}
+  manual-build · ${{ inputs.GIT_BRANCH }}${{ inputs.OPERATION != 'full' &&
+  format(' · {0} {1}', inputs.OPERATION, inputs.ENVIRONMENT) || '' }}
 
 # Deploys come first, and a dev build never takes more than its share of the runners:
 # - deploy / upgrade (multi-deploy, the deploy tool): a group of its own (its run id), never cancelled,
@@ -43,10 +65,10 @@ run-name: >
 # A build that is cancelled or fails cancels its test suite too ("Stop the test suite" below).
 concurrency:
   group: >-
-    manual-build-${{ github.event.inputs.OPERATION == 'full' &&
-    format('full-{0}-{1}', github.event.inputs.GIT_BRANCH, github.event.inputs.ENVIRONMENT) ||
+    manual-build-${{ inputs.OPERATION == 'full' &&
+    format('full-{0}-{1}', inputs.GIT_BRANCH, inputs.ENVIRONMENT) ||
     github.run_id }}
-  cancel-in-progress: ${{ github.event.inputs.GIT_BRANCH != 'main' }}
+  cancel-in-progress: ${{ inputs.GIT_BRANCH != 'main' }}
 
 jobs:
   main:
@@ -71,8 +93,8 @@ jobs:
       # branch. A commit no branch holds any more is still fetched: its pull request's ref keeps it.
       - name: checkout
         env:
-          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
-          GIT_SHA: ${{ github.event.inputs.GIT_SHA }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
           REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
           pwd
@@ -90,11 +112,14 @@ jobs:
       # build script), started before this job's own setup instead of from the build script a minute
       # later: with a warm Nx cache that minute was the wait for the tests. The run id reaches the build
       # as TEST_SUITE_RUN_ID. A branch without the script (before PMC-5315) dispatches from the build.
+      # A push's build awaits the suite its router already started (TEST_SUITE_RUN_ID input).
       - name: Start the test suite
         id: test-suite
-        if: github.event.inputs.OPERATION == 'full' && hashFiles('shared/build/scripts/test-suite/dispatch.sh') != ''
+        if: >-
+          inputs.OPERATION == 'full' && inputs.TEST_SUITE_RUN_ID == '' &&
+          hashFiles('shared/build/scripts/test-suite/dispatch.sh') != ''
         env:
-          GIT_BRANCH: ${{ github.event.inputs.GIT_BRANCH }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
         run: |
           bash ./shared/build/scripts/test-suite/dispatch.sh
           echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
@@ -178,7 +203,7 @@ jobs:
         id: jobs
         run: |
           JOBS_URL="https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
-          JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
+          JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}" or (.name | endswith(" / ${{ github.job }}"))) | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
 
       - name: ensure aws cli is present
@@ -191,15 +216,18 @@ jobs:
           aws configure set aws_secret_access_key "${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY}}"
       
       # export any variables needed for the build script before running it
+      # GH_PASSWORD, the AWS keys and JIRA_AUTH_TOKEN reach the script from the job's env above. The inputs
+      # go through env too, never interpolated into the script: a branch name is free text.
       - name: BUILD
         env:
-          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          JOB_URL: ${{ steps.jobs.outputs.html_url }}
+          ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+          SALT: ${{ secrets.SALT }}
+          OPERATION: ${{ inputs.OPERATION }}
         run: |
-          export GH_PASSWORD="${{ secrets.GH_PASSWORD }}"
-          export DEFAULT_AWS_ACCESS_KEY_ID="${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"
-          export DEFAULT_AWS_SECRET_ACCESS_KEY="${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
-          export JIRA_AUTH_TOKEN="${{ secrets.JIRA_AUTH_TOKEN }}"
-          ./shared/build/boot.sh "${{ github.event.inputs.GIT_BRANCH}}" "${{ steps.jobs.outputs.html_url }}" "${{ github.event.inputs.ENVIRONMENT }}" "${{ secrets.SALT }}" "${{ github.event.inputs.OPERATION }}"
+          ./shared/build/boot.sh "$GIT_BRANCH" "$JOB_URL" "$ENVIRONMENT" "$SALT" "$OPERATION"
 
       # The test suite is a run of its own, which the cancellation of this build does not reach: a build
       # replaced by a newer push, or one that failed before its tests ended, would leave it holding a
