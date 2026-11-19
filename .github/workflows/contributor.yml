@@ -28,9 +28,12 @@ on:
           - contributor-staging
         default: contributor-dev
 
-# The deploy tool reads this title: contributor · <branch> · <environment> · <commit>
+# The deploy tool reads this title: contributor · <branch> · <environment> · <commit>. The third part is the
+# environment the run deploys to, or "gate" for a run that deploys nothing (a push to a branch other than main,
+# the condition of the deploy-convox job below), which the tool then does not take for a deploy.
 run-name: >-
-  contributor · ${{ inputs.GIT_BRANCH }} · ${{ inputs.ENVIRONMENT || 'contributor-dev' }} · ${{ inputs.GIT_SHA }}
+  contributor · ${{ inputs.GIT_BRANCH }} · ${{ (inputs.TEST_SUITE_RUN_ID == '' || inputs.GIT_BRANCH == 'main') &&
+  (inputs.ENVIRONMENT || 'contributor-dev') || 'gate' }} · ${{ inputs.GIT_SHA }}
 
 # As manual-build.yml (PMC-6646):
 # - a manual deploy: a group of its own (its run id), never cancelled.
