@@ -2,10 +2,13 @@ name: contributor
 
 # The pipeline of the contributor portal (apps/contributor of atex-products/mytype). Dispatched by route.yml for a
 # push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
-# GIT_BRANCH, GIT_SHA, ENVIRONMENT). Gate (the push's test suite, or one started here for a manual deploy), then
-# the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
+# GIT_BRANCH, GIT_SHA, ENVIRONMENT, OPERATION). Gate (the push's test suite, or one started here for a manual
+# deploy), then the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
 # A push deploys (to the default environment, contributor-dev) only on main; on any other branch the run is the
 # gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
+# OPERATION, as in manual-build.yml: `full` (the default, and what a push is) tests then deploys, `deploy` is the
+# plain deploy of a manual run: no suite is started and none awaited, the environment is read and deployed. A run
+# handed a TEST_SUITE_RUN_ID (a push) always awaits it, whatever its OPERATION.
 on:
   workflow_dispatch:
     inputs:
@@ -27,10 +30,19 @@ on:
           - contributor-dev
           - contributor-staging
         default: contributor-dev
+      OPERATION:
+        type: choice
+        description: 'action to perform (full=test & deploy, deploy=plain deploy, without the test suite)'
+        required: true
+        default: full
+        options:
+          - full
+          - deploy
 
 # The deploy tool reads this title: contributor · <branch> · <environment> · <commit>. The third part is the
 # environment the run deploys to, or "gate" for a run that deploys nothing (a push to a branch other than main,
-# the condition of the deploy-convox job below), which the tool then does not take for a deploy.
+# the condition of the deploy-convox job below), which the tool then does not take for a deploy. A plain deploy
+# is a manual one (no TEST_SUITE_RUN_ID), so it names its environment like any other.
 run-name: >-
   contributor · ${{ inputs.GIT_BRANCH }} · ${{ (inputs.TEST_SUITE_RUN_ID == '' || inputs.GIT_BRANCH == 'main') &&
   (inputs.ENVIRONMENT || 'contributor-dev') || 'gate' }} · ${{ inputs.GIT_SHA }}
@@ -81,10 +93,10 @@ jobs:
           fi
 
       # A push arrives with the suite its router started (TEST_SUITE_RUN_ID). A manual deploy has no router run:
-      # it starts the suite itself, as manual-build.yml does.
+      # it starts the suite itself, as manual-build.yml does, unless it is a plain deploy.
       - name: Start the test suite
         id: test-suite
-        if: inputs.TEST_SUITE_RUN_ID == ''
+        if: inputs.TEST_SUITE_RUN_ID == '' && inputs.OPERATION != 'deploy'
         env:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
         run: |
@@ -93,6 +105,7 @@ jobs:
           rm test_suite_run_id.txt
 
       - name: Quality gate
+        if: inputs.TEST_SUITE_RUN_ID != '' || inputs.OPERATION != 'deploy'
         env:
           TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
         run: bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"
