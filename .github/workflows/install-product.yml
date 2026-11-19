@@ -39,8 +39,6 @@ permissions:
 jobs:
   install:
     runs-on: ubuntu-latest
-    env:
-      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
     steps:
       # Same checkout as setup-new-instance.yml: the branch the file is pushed to, with the credential to push.
       - name: checkout
@@ -48,7 +46,6 @@ jobs:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
           REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
-          git config --global http.sslverify false
           git clone --branch "$GIT_BRANCH" "$REPO_URL" .
 
       # Before anything else logs a value: the whole base64 and every value of every line. A masked value that
