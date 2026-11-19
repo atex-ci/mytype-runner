@@ -205,12 +205,15 @@ jobs:
           aws configure set aws_secret_access_key "${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY}}"
       
       # export any variables needed for the build script before running it
+      # GH_PASSWORD, the AWS keys and JIRA_AUTH_TOKEN reach the script from the job's env above. The inputs
+      # go through env too, never interpolated into the script: a branch name is free text.
       - name: BUILD
         env:
           TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          JOB_URL: ${{ steps.jobs.outputs.html_url }}
+          ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+          SALT: ${{ secrets.SALT }}
+          OPERATION: ${{ inputs.OPERATION }}
         run: |
-          export GH_PASSWORD="${{ secrets.GH_PASSWORD }}"
-          export DEFAULT_AWS_ACCESS_KEY_ID="${{ secrets.DEFAULT_AWS_ACCESS_KEY_ID }}"
-          export DEFAULT_AWS_SECRET_ACCESS_KEY="${{ secrets.DEFAULT_AWS_SECRET_ACCESS_KEY }}"
-          export JIRA_AUTH_TOKEN="${{ secrets.JIRA_AUTH_TOKEN }}"
-          ./shared/build/boot.sh "${{ inputs.GIT_BRANCH }}" "${{ steps.jobs.outputs.html_url }}" "${{ inputs.ENVIRONMENT }}" "${{ secrets.SALT }}" "${{ inputs.OPERATION }}"
+          ./shared/build/boot.sh "$GIT_BRANCH" "$JOB_URL" "$ENVIRONMENT" "$SALT" "$OPERATION"

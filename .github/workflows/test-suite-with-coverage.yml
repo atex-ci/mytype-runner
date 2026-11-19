@@ -29,12 +29,14 @@ on:
         default: ''
         type: string
 
+# The commit is in the title: await.sh (shared/build/scripts/test-suite/) checks that the run it awaits is the
+# suite of the commit being built, and a dispatched run's own head_sha is this repository's.
 run-name: >
-  test-suite-with-coverage · ${{ inputs.GIT_BRANCH }}
-  
-# The unit-test gate of the mytype deploy pipeline (shared/build/scripts/build/index.mjs dispatches
-# it and waits for it), and the first job of sonar-scan.yml, which analyses the coverage this run
-# uploads as the `coverage-lcov` artifact.
+  test-suite-with-coverage · ${{ inputs.GIT_BRANCH }} · ${{ inputs.GIT_SHA }}
+
+# The gate of every product pipeline (route.yml, manual-build.yml or shared/build/scripts/build/index.mjs
+# dispatch it, await.sh waits for it): lint of every project, then the unit tests. It is also the first job of
+# sonar-scan.yml, which analyses the coverage this run uploads as the `coverage-lcov` artifact.
 jobs:
   tests:
     name: Test suite
@@ -143,6 +145,28 @@ jobs:
           JOBS_URL="https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
           JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
+
+      # Every project is linted here, whatever product the push changes: a lint failure fails the run, and
+      # with it the pipeline of every product awaiting it. Biome writes its fixes, so a file it had to fix
+      # (and left uncommitted) fails the next step, before the tests produce outputs of their own.
+      - name: Lint
+        run: npx nx run-many --target=lint --parallel
+
+      # The paths the async client build above rewrites are not the lint's.
+      - name: Check that lint left no uncommitted files
+        run: |
+          changed=$(git status --porcelain | grep -v \
+            -e 'apps/client/src/sentry.init.ts' \
+            -e 'apps/client/src/constants.ts' \
+            -e 'apps/client/astro.config.mjs' \
+            -e 'docs/' \
+            -e 'terminalOutput' || true)
+          if [ -n "$changed" ]; then
+            echo "There are uncommitted changes in the current git repo. Did you forget to lint some source files? Here is the output of 'git status --porcelain':"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
 
       - name: Run Tests
         run: |

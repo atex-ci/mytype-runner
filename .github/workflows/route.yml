@@ -1,9 +1,10 @@
 name: route
 
 # Every push to atex-products/mytype lands here (its on-push.yml). The router knows no product: it starts
-# the push's test suite once (Nx, cached: product agnostic), checks once that the commit message names its
-# Jira ticket, and dispatches the pipeline workflow named
-# after every product the push changes (<product>.yml), handing it the test suite's run id to gate on.
+# the push's test suite once (lint and tests of every project, Nx cached: product agnostic), checks once that
+# the commit message names its Jira ticket, and dispatches the pipeline workflow named after every product
+# the push changes (<product>.yml), handing it the test suite's run id to gate on. A product whose dispatch
+# fails does not stop the others; the run fails at the end.
 # The products come from the Nx graph (shared/build/scripts/products/affected-products.mjs in mytype).
 on:
   workflow_dispatch:
@@ -13,6 +14,10 @@ on:
         required: true
       GIT_SHA:
         description: 'pushed commit (default: the tip of the branch)'
+        required: false
+        default: ''
+      BASE_SHA:
+        description: 'commit before the push (github.event.before): what a push to main is compared with'
         required: false
         default: ''
 
@@ -107,6 +112,7 @@ jobs:
         id: products
         env:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          BASE_SHA: ${{ inputs.BASE_SHA }}
         run: |
           script=shared/build/scripts/products/affected-products.mjs
           if [ -f "$script" ]; then
@@ -118,27 +124,41 @@ jobs:
           echo "products: $list"
           echo "list=$list" >> "$GITHUB_OUTPUT"
 
+      # Every product is dispatched even when another one fails; the failures are collected and fail the run at
+      # the end. The pipeline workflows are listed once: a product without one is a warning (it has no pipeline
+      # yet), while any other answer of GitHub, a 404 of the dispatch included, is a failure.
       - name: Dispatch the product pipelines
         env:
           PRODUCTS: ${{ steps.products.outputs.list }}
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
           TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+          API: https://api.github.com/repos/${{ github.repository }}/actions/workflows
         run: |
           sha=$(git rev-parse HEAD)
           products=$(echo "$PRODUCTS" | jq -r '.[]')
           if [ -z "$products" ]; then
             echo "::notice::the push changes no product: tests only"
+            exit 0
           fi
+          curl -sS --fail-with-body -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_PASSWORD" \
+            "$API?per_page=100" -o workflows.json
+          failed=""
           for product in $products; do
+            if ! jq -e --arg path ".github/workflows/$product.yml" '.workflows[] | select(.path == $path)' workflows.json > /dev/null; then
+              echo "::warning::product $product has no pipeline yet ($product.yml): not built"
+              continue
+            fi
             payload=$(jq -cn --arg branch "$GIT_BRANCH" --arg sha "$sha" --arg tests "$TEST_SUITE_RUN_ID" \
               '{ref: "main", inputs: {GIT_BRANCH: $branch, GIT_SHA: $sha, TEST_SUITE_RUN_ID: $tests}}')
             code=$(curl -s -o response.json -w '%{http_code}' -X POST \
               -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_PASSWORD" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$product.yml/dispatches" \
-              -d "$payload")
+              "$API/$product.yml/dispatches" -d "$payload")
             case "$code" in
               204|200) echo "::notice::$product pipeline dispatched" ;;
-              404) echo "::warning::product $product has no pipeline yet ($product.yml): not built" ;;
-              *) echo "dispatch of $product.yml answered $code: $(cat response.json)"; exit 1 ;;
+              *) echo "::error::dispatch of $product.yml answered $code: $(cat response.json)"; failed="$failed $product" ;;
             esac
           done
+          if [ -n "$failed" ]; then
+            echo "::error::not dispatched:$failed"
+            exit 1
+          fi
