@@ -148,16 +148,11 @@ jobs:
       - name: Lint
         run: npx nx run-many --target=lint --parallel
 
-      # The paths the async client build above rewrites are not the lint's.
+      # Nothing else of this run writes a tracked file: the files the deploy build rewrites (prepare-client.sh,
+      # the installer's postbuild into docs/) are not touched here, and Nx's terminalOutput is ignored by git.
       - name: Check that lint left no uncommitted files
         run: |
-          changed=$(git status --porcelain | grep -v \
-            -e 'apps/client/src/sentry.init.ts' \
-            -e 'apps/client/src/constants.ts' \
-            -e 'apps/client/astro.config.mjs' \
-            -e 'docs/' \
-            -e 'terminalOutput' || true)
-          if [ -n "$changed" ]; then
+          if [ -n "$(git status --porcelain)" ]; then
             echo "There are uncommitted changes in the current git repo. Did you forget to lint some source files? Here is the output of 'git status --porcelain':"
             git status --porcelain
             git diff

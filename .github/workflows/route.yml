@@ -100,6 +100,7 @@ jobs:
       # The commit message starts with a ticket of the Jira filter JIRA_FILTER_ID in all.env (shared/build/tools/jira).
       # A message without one fails the push before any product pipeline runs.
       - name: Check the commit message
+        id: jira
         env:
           JIRA_AUTH_TOKEN: ${{ secrets.JIRA_AUTH_TOKEN }}
         run: |
@@ -162,3 +163,13 @@ jobs:
             echo "::error::not dispatched:$failed"
             exit 1
           fi
+
+      # A rejected commit message leaves the suite started above holding a runner for a push that goes no
+      # further. Only that failure cancels it: after any other one (a product that did not dispatch) the
+      # pipelines of the other products may be awaiting it.
+      - name: Stop the test suite of a rejected commit message
+        if: failure() && steps.jira.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PASSWORD }}
+          RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+        run: gh run cancel "$RUN_ID" -R "$GITHUB_REPOSITORY" || true
