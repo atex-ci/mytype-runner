@@ -1,17 +1,23 @@
 name: install-product
 
 # Installs a new environment of a product on a Convox rack (apps/<PRODUCT>/ of atex-products/mytype), for the
-# installer of the deploy tool. The logic is shared/build/scripts/products/install.mjs of GIT_BRANCH: it adds
-# apps/<PRODUCT>/deploy/<ENVIRONMENT>.env (ENV_FILE_CONTENT, base64, not secret), creates the Convox app, sets
-# VARIABLES (an envelope, see below), deploys once through deploy.mjs, writes the app's URL
-# into the file and commits that file to GIT_BRANCH. A failed run changed nothing in the repository and can be run
-# again: an app that exists on the rack is not created twice.
+# installer of the deploy tool, in two jobs:
+#   secrets  the Convox app on the rack: created if the rack does not list it, marked as this product's, its variables
+#            set from stdin. Runs code of THIS repository only (scripts/prepare-app.mjs) and nothing of the branch.
+#   install  the code of the branch being built (shared/build/scripts/products/install.mjs of GIT_BRANCH): adds
+#            apps/<PRODUCT>/deploy/<ENVIRONMENT>.env (ENV_FILE_CONTENT, base64, not secret), deploys once through
+#            deploy.mjs, writes the app's URL into the file and commits that file to GIT_BRANCH. It is told the NAMES of
+#            the variables that were set, never a value.
+# A failed run changed nothing in the repository and can be run again: an app that is the install's own is reused.
 #
 # VARIABLES is an envelope (v1.…) of the KEY=VALUE lines, encrypted by the installer to a public key: a dispatch input
-# is readable by whoever can read the run, so it never holds a secret in clear, and a value in clear is refused. The
-# first step opens it with scripts/decrypt-secrets.mjs of THIS repository, the only place the private key
-# (INSTALL_SECRETS_PRIVATE_KEY, a secret of this repository) is ever in the environment: the code of the branch being
-# built, which runs after, never sees it. Every value is masked before anything else runs.
+# is readable by whoever can read the run, so it never holds a secret in clear, and a value in clear is refused.
+#
+# THE RULE (for setup-new-instance.yml too): the job that holds the key performs the side effect that consumes the
+# secrets, and branch code never receives the values. A secret that any step of a job references stays in the memory
+# of the runner process for the whole job, where code of the branch (install scripts have sudo) can read it: so
+# INSTALL_SECRETS_PRIVATE_KEY is referenced by the `secrets` job alone, which never checks out or installs anything of
+# the branch.
 on:
   workflow_dispatch:
     inputs:
@@ -43,25 +49,45 @@ permissions:
   contents: read
 
 jobs:
-  install:
+  secrets:
     runs-on: ubuntu-latest
+    outputs:
+      variables: ${{ steps.prepare.outputs.variables }}
     steps:
-      # The script is read from this repository at the commit this run was dispatched on, not from the branch.
-      # Masks first, then writes the lines to a file (mode 600) that the Install step reads. The steps after this one run as
-      # the same user, the branch's install scripts among them: they get the values, never the private key.
-      - name: Decrypt the variables
+      # This repository at the commit the run was dispatched on: the only code this job runs.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # As contributor.yml: the latest release.
+      - name: Convox CLI
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          sudo install -m 755 convox /usr/local/bin/convox
+          rm convox
+          convox version
+
+      # Checks the inputs, asks GitHub (with the credential of this job) about the branch and the files it needs,
+      # opens the envelope, masks every value, then creates the app and sets its variables. The inputs reach the
+      # script through the environment, never through the shell line. Its output is the names of the variables set.
+      - name: Prepare the app on the rack
+        id: prepare
         env:
           ENVELOPE: ${{ inputs.VARIABLES }}
           INSTALL_SECRETS_PRIVATE_KEY: ${{ secrets.INSTALL_SECRETS_PRIVATE_KEY }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          curl -fsSL --retry 3 \
-            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
-            -o "$RUNNER_TEMP/decrypt-secrets.mjs" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/scripts/decrypt-secrets.mjs?ref=$GITHUB_SHA"
-          node "$RUNNER_TEMP/decrypt-secrets.mjs" --out "$RUNNER_TEMP/install-variables"
-          rm "$RUNNER_TEMP/decrypt-secrets.mjs"
+          CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          PRODUCT: ${{ inputs.PRODUCT }}
+          ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+          ENV_FILE_CONTENT: ${{ inputs.ENV_FILE_CONTENT }}
+        run: node scripts/prepare-app.mjs
 
+  install:
+    needs: secrets
+    runs-on: ubuntu-latest
+    steps:
       # Same checkout as setup-new-instance.yml: the branch the file is pushed to, with the credential to push.
       - name: checkout
         env:
@@ -114,7 +140,8 @@ jobs:
           convox version
 
       # The inputs reach the script through the environment, never through the shell line: the script checks
-      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env.
+      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env. No key and no value is here:
+      # SECRET_VARIABLES is `set:` and the names of the variables the first job set.
       - name: Install
         env:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
@@ -122,6 +149,5 @@ jobs:
           ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
           ENV_FILE_CONTENT: ${{ inputs.ENV_FILE_CONTENT }}
           CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
-        run: |
-          VARIABLES="$(base64 -w0 "$RUNNER_TEMP/install-variables")" \
-            node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
+          SECRET_VARIABLES: ${{ needs.secrets.outputs.variables }}
+        run: node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
