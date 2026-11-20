@@ -6,7 +6,12 @@ name: destroy-product
 # then commits the removal of that file to GIT_BRANCH, with a message that skips CI.
 # It refuses an environment whose TARGET is not convox, and an app on the rack that lacks INSTALLED_PRODUCT=<PRODUCT>
 # (the mark install-product.yml sets): app names are rack-wide, and a destroy must never reach an app of anyone else.
-# A failed run can be run again: an app that is gone already does not stop it, the file is still removed.
+# A failed run can be run again: an app that is gone already does not stop it, the file is still removed, and an app
+# the rack lists as deleting (a Convox v2 delete is a CloudFormation stack deletion, which can outlast the wait) is
+# waited for, never deleted a second time.
+#
+# A deploy of the same environment (contributor.yml, a group of its own) can run during a destroy: it fails, without
+# harm, once the app is gone. A destroy waits behind an install of the environment, not behind a deploy.
 #
 # No secret of the install is needed, and none is here: CONVOX_TOKEN and GH_PASSWORD, which every pipeline has, are
 # all it takes.
