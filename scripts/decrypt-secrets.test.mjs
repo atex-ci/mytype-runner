@@ -1,41 +1,11 @@
 // node --test scripts/decrypt-secrets.test.mjs
 import assert from 'node:assert/strict'
-import { generateKeyPairSync } from 'node:crypto'
-import { mkdtempSync, readFileSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { decryptEnvelope, decryptToFile, maskCommands } from './decrypt-secrets.mjs'
+import { decryptEnvelope, maskCommands } from './decrypt-secrets.mjs'
+import { b64, encrypt, open, pair, seal } from './envelope-test-helpers.mjs'
 
-const pair = () => {
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-  return {
-    publicKey: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
-    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }),
-  }
-}
 const keys = pair()
 
-// The installer's side, as WebCrypto does it in the browser (apps/installer/src/business-logic/secret-envelope.ts):
-// written here again, so the round trip is two implementations of the format, not one
-const b64 = (bytes) => Buffer.from(bytes).toString('base64')
-const encrypt = async (text, publicKey) => {
-  const wrapper = await crypto.subtle.importKey(
-    'spki',
-    Buffer.from(publicKey, 'base64'),
-    { name: 'RSA-OAEP', hash: 'SHA-256' },
-    false,
-    ['encrypt']
-  )
-  const aesKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt'])
-  const iv = crypto.getRandomValues(new Uint8Array(12))
-  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text))
-  const key = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, wrapper, await crypto.subtle.exportKey('raw', aesKey))
-  const body = { alg: 'RSA-OAEP-256+A256GCM', key: b64(key), iv: b64(iv), data: b64(data) }
-  return `v1.${Buffer.from(JSON.stringify(body)).toString('base64')}`
-}
-const open = (envelope) => JSON.parse(Buffer.from(envelope.slice(3), 'base64').toString('utf8'))
-const seal = (body) => `v1.${Buffer.from(JSON.stringify(body)).toString('base64')}`
 const flip = (text) => b64(Buffer.from(text, 'base64').map((byte, at) => (at === 3 ? byte ^ 1 : byte)))
 
 const SECRET = 'client-secret-value'
@@ -122,42 +92,5 @@ describe('maskCommands', () => {
       '::add-mask::plainsecret',
       '::add-mask::1',
     ])
-  })
-})
-
-describe('decryptToFile', () => {
-  const run = async (overrides = {}) => {
-    const out = join(mkdtempSync(join(tmpdir(), 'decrypt-')), 'variables')
-    const logged = []
-    const env = {
-      ENVELOPE: await encrypt(text, keys.publicKey),
-      INSTALL_SECRETS_PRIVATE_KEY: keys.privateKey,
-      ...overrides,
-    }
-    return { out, logged, run: () => decryptToFile({ env, out, log: (line) => logged.push(line) }) }
-  }
-
-  it('masks first, then writes the text to a file only its owner reads', async () => {
-    const { out, logged, run: go } = await run()
-
-    go()
-
-    assert.ok(logged.includes(`::add-mask::${SECRET}`))
-    assert.ok(logged.every((line) => line.startsWith('::add-mask::')))
-    assert.equal(readFileSync(out, 'utf8'), text)
-    assert.equal(statSync(out).mode & 0o777, 0o600)
-  })
-
-  it('writes nothing when the envelope is refused', async () => {
-    const { out, logged, run: go } = await run({ ENVELOPE: Buffer.from(text).toString('base64') })
-
-    assert.throws(go, /in clear is refused/)
-    assert.deepEqual(logged, [])
-    assert.throws(() => statSync(out))
-  })
-
-  it('needs the envelope and the key, and says which is missing', async () => {
-    assert.throws((await run({ ENVELOPE: '' })).run, /no envelope/)
-    assert.throws((await run({ INSTALL_SECRETS_PRIVATE_KEY: '' })).run, /INSTALL_SECRETS_PRIVATE_KEY is not set/)
   })
 })

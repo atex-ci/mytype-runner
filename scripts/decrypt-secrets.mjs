@@ -3,16 +3,10 @@
 // Opens an envelope of secrets (made by the installer, apps/installer/src/business-logic/secret-envelope.ts of
 // atex-products/mytype): `v1.` and the base64 of a JSON { alg, key, iv, data }; `data` is the text encrypted with a
 // random AES-256-GCM key (`iv`, the tag after the ciphertext), `key` is that AES key wrapped with RSA-OAEP (SHA-256).
-// It names no product: a workflow gives it the envelope and the private key in its environment, and a file to write.
-// It runs from this repository, before any code of the branch being built does, so that code never sees the key.
-//
-//   ENVELOPE=<v1.…> INSTALL_SECRETS_PRIVATE_KEY=<PEM> node decrypt-secrets.mjs --out <file>
-//
-// Every line of KEY=VALUE has its value masked in the workflow's logs (and the envelope itself) before the file is
-// written. An error never carries a value.
+// It names no product and keeps nothing: a script of this repository, run by the job that holds the private key,
+// opens the envelope in memory, masks the values and uses them there (prepare-app.mjs). Nothing writes the text to a
+// file, and an error never carries a value.
 import { constants, createDecipheriv, createPrivateKey, privateDecrypt } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
 
 export const ENVELOPE_PREFIX = 'v1.'
 export const ENVELOPE_ALGORITHM = 'RSA-OAEP-256+A256GCM'
@@ -74,33 +68,3 @@ export const maskCommands = (envelope, text) =>
   [envelope, ...text.split('\n').map((line) => line.replace(/\r$/, '').slice(line.indexOf('=') + 1))]
     .filter((value) => value !== '')
     .map((value) => `::add-mask::${value}`)
-
-/** Decrypts `env.ENVELOPE` with `env.INSTALL_SECRETS_PRIVATE_KEY`, masks, then writes the text to `out` (mode 600). */
-export const decryptToFile = ({ env, out, log = console.log }) => {
-  const envelope = env.ENVELOPE ?? ''
-  const privateKey = env.INSTALL_SECRETS_PRIVATE_KEY ?? ''
-  if (envelope === '') {
-    fail('There is no envelope: the VARIABLES input is empty')
-  }
-  if (privateKey === '') {
-    fail('INSTALL_SECRETS_PRIVATE_KEY is not set: it is a secret of this repository')
-  }
-  if (!out) {
-    fail('Usage: decrypt-secrets.mjs --out <file>')
-  }
-  const text = decryptEnvelope(envelope, privateKey)
-  for (const command of maskCommands(envelope, text)) {
-    log(command)
-  }
-  writeFileSync(out, text, { mode: 0o600 })
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    const at = process.argv.indexOf('--out')
-    decryptToFile({ env: process.env, out: at > 0 ? process.argv[at + 1] : '' })
-  } catch (error) {
-    console.error(`::error::${error.message}`)
-    process.exit(1)
-  }
-}
