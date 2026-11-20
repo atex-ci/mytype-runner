@@ -44,7 +44,9 @@ services:
       - KEYCLOAK_CLIENT_SECRET
       - API_BASE_URL
       - AUTH_SECRET
-      - AUTH_URL
+      # The public URL; empty is the request's own (public-url.ts). Empty by default because a rack refuses to build
+      # an app with a required variable unset, and a new environment learns its URL only from its first deploy
+      - AUTH_URL=
       # Behind the load balancer; a default, not a secret
       - AUTH_TRUST_HOST=true
       # Empty unless the browser uploads media to a bucket origin
