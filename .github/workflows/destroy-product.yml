@@ -1,0 +1,101 @@
+name: destroy-product
+
+# Destroys an environment of a product that install-product.yml created (apps/<PRODUCT>/ of atex-products/mytype), for
+# the deploy tool: the code of the branch (shared/build/scripts/products/destroy.mjs of GIT_BRANCH) reads
+# apps/<PRODUCT>/deploy/<ENVIRONMENT>.env, deletes the Convox app it names and waits until the rack no longer lists it,
+# then commits the removal of that file to GIT_BRANCH, with a message that skips CI.
+# It refuses an environment whose TARGET is not convox, and an app on the rack that lacks INSTALLED_PRODUCT=<PRODUCT>
+# (the mark install-product.yml sets): app names are rack-wide, and a destroy must never reach an app of anyone else.
+# A failed run can be run again: an app that is gone already does not stop it, the file is still removed.
+#
+# No secret of the install is needed, and none is here: CONVOX_TOKEN and GH_PASSWORD, which every pipeline has, are
+# all it takes.
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch the environment file is removed from'
+        required: true
+        default: 'main'
+      PRODUCT:
+        description: 'product, as in apps/<product> (contributor)'
+        required: true
+      ENVIRONMENT:
+        description: 'name of the environment to destroy, also the name of its Convox app'
+        required: true
+
+run-name: destroy · ${{ inputs.PRODUCT }} · ${{ inputs.ENVIRONMENT }} · ${{ inputs.GIT_BRANCH }}
+
+# The group of install-product.yml: an install and a destroy of one environment never run together. None is cancelled
+# once started.
+concurrency:
+  group: install-${{ inputs.PRODUCT }}-${{ inputs.ENVIRONMENT }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      # Same checkout as install-product.yml: the branch the file is removed from, with the credential to push.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # As contributor.yml: the latest release.
+      - name: Convox CLI
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          sudo install -m 755 convox /usr/local/bin/convox
+          rm convox
+          convox version
+
+      # The inputs reach the script through the environment, never through the shell line: the script checks
+      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env.
+      - name: Destroy
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          PRODUCT: ${{ inputs.PRODUCT }}
+          ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+          CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
+        run: node shared/build/scripts/products/destroy.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
