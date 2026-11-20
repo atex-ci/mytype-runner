@@ -3,11 +3,10 @@
 // The rack half of install-product.yml, run by the job that holds the secrets (INSTALL_SECRETS_PRIVATE_KEY and
 // CONVOX_TOKEN), which runs nothing of the branch being built. It opens the envelope of the variables in memory,
 // masks them, creates the Convox app (only if the rack does not list it), waits until it runs, marks it as this
-// product's and sets its variables from stdin. No value is written to a file or put on a command line. Its only
-// output is the NAMES of the variables it set, for the job that runs the branch's code: that job never receives a
-// value. The inputs that need no checkout are checked first, before the rack is touched.
+// product's and sets its variables from stdin. No value is written to a file or put on a command line, and the job
+// reports nothing to the next one (GitHub drops an output that holds a masked value). The inputs that need no
+// checkout are checked first, before the rack is touched.
 import { spawnSync } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { decryptEnvelope, maskCommands } from './decrypt-secrets.mjs'
 
@@ -69,7 +68,7 @@ export const createAppLine = ({ rack, app, product }) => {
   const on = (...args) => words('convox', ...args, '--rack', rack)
   const mark = `INSTALLED_PRODUCT=${product}`
   const waitRunning = `{ n=0; until ${on('apps', 'info', app)} | grep -Eq '^Status +running'; do n=$((n+1)); [ "$n" -lt 60 ] || { echo ${quote(`app ${app} is not running`)} >&2; exit 1; }; sleep 10; done; }`
-  const refusal = `app ${app} exists on ${rack} and was not created by an install of ${product}`
+  const refusal = `app ${app} exists on ${rack} and was not created by an install of ${product}. If it is the leftover of a failed install of ${product}, mark it by hand and run the install again: ${words('convox', 'env', 'set', mark, '--app', app, '--rack', rack)}`
   return [
     `if ${on('apps')} | awk '{print $1}' | grep -qx ${quote(app)}; then`,
     `${on('env', '--app', app)} | grep -qx ${quote(mark)} || { echo ${quote(refusal)} >&2; exit 1; };`,
@@ -108,9 +107,8 @@ const checkInputs = ({ env, config }) => {
 }
 
 /**
- * Prepares the app on the rack and returns the names of the variables it set to a value. `github` answers
- * { branch(), file(path) } (does it exist on the branch); `run(line)` and `runWithInput(line, input)` run a shell
- * line; `log` prints a workflow command.
+ * Prepares the app on the rack. `github` answers { branch(), file(path) } (does it exist on the branch); `run(line)`
+ * and `runWithInput(line, input)` run a shell line; `log` prints a workflow command.
  */
 export const prepareApp = async ({ env, github, run, runWithInput, log }) => {
   const { PRODUCT: product, ENVIRONMENT: environment, GIT_BRANCH: branch = '' } = env
@@ -149,7 +147,6 @@ export const prepareApp = async ({ env, github, run, runWithInput, log }) => {
   if (Object.keys(variables).length > 0) {
     await runWithInput(words('convox', 'env', 'set', '--app', environment, '--rack', rack), text)
   }
-  return Object.keys(variables).filter((name) => variables[name] !== '')
 }
 
 /** Runs a line with bash, printing it (the lines hold names, never values) and failing when it does. */
@@ -199,14 +196,12 @@ export const childEnvironment = (env) => {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const names = await prepareApp({
+    await prepareApp({
       env: process.env,
       github: githubOf(process.env),
       ...shell({ env: childEnvironment(process.env) }),
       log: console.log,
     })
-    // Always "set:", so that an output GitHub drops (it drops one that holds a masked value) is not taken for "none"
-    appendFileSync(process.env.GITHUB_OUTPUT, `variables=set:${names.join(',')}\n`)
   } catch (error) {
     console.error(`::error::${error.message}`)
     process.exit(1)

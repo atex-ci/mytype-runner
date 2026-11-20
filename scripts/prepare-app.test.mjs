@@ -100,10 +100,10 @@ describe('prepareApp, on a rack that does not list the app', () => {
     assert.equal(r.variables(), `INSTALLED_PRODUCT=contributor\n${text}`)
   })
 
-  it('returns the names of the variables that have a value, not the empty one', async () => {
+  it('reports nothing to the next job: it returns no name and no value', async () => {
     const r = await prepare()
 
-    assert.deepEqual(await r.result, ['KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_REALM', 'AUTH_SECRET'])
+    assert.equal(await r.result, undefined)
   })
 
   it('puts no value on a command line, in the output of the run, or in a file', async () => {
@@ -148,10 +148,10 @@ describe('prepareApp, on a rack that does not list the app', () => {
     assert.ok(timeline.every(([kind, line]) => kind !== 'log' || line.startsWith('::add-mask::')))
   })
 
-  it('returns no name when every value is empty', async () => {
+  it('sets an empty value as it is', async () => {
     const r = await prepare({ overrides: { ENVELOPE: await encrypt('AUTH_URL=\n', keys.publicKey, CONTEXT) } })
 
-    assert.deepEqual(await r.result, [])
+    await r.result
     assert.equal(r.variables(), 'INSTALLED_PRODUCT=contributor\nAUTH_URL=\n')
   })
 })
@@ -173,6 +173,11 @@ describe('prepareApp, on a rack that lists the app', () => {
       assert.ok(
         r.err.join('').includes(
           'app contributor-test exists on atex-cloud/newsbeat-prod and was not created by an install of contributor'
+        )
+      )
+      assert.ok(
+        r.err.join('').includes(
+          'mark it by hand and run the install again: convox env set INSTALLED_PRODUCT=contributor --app contributor-test --rack atex-cloud/newsbeat-prod'
         )
       )
       assert.ok(!r.calls().includes('apps create'))

@@ -6,18 +6,20 @@ name: install-product
 #            set from stdin. Runs code of THIS repository only (scripts/prepare-app.mjs) and nothing of the branch.
 #   install  the code of the branch being built (shared/build/scripts/products/install.mjs of GIT_BRANCH): adds
 #            apps/<PRODUCT>/deploy/<ENVIRONMENT>.env (ENV_FILE_CONTENT, base64, not secret), deploys once through
-#            deploy.mjs, writes the app's URL into the file and commits that file to GIT_BRANCH. It is told the NAMES of
-#            the variables that were set, never a value.
+#            deploy.mjs, writes the app's URL into the file and commits that file to GIT_BRANCH. The first job reports
+#            nothing to it, and it is handed no value and no key.
 # A failed run changed nothing in the repository and can be run again: an app that is the install's own is reused.
 #
 # VARIABLES is an envelope (v1.…) of the KEY=VALUE lines, encrypted by the installer to a public key: a dispatch input
 # is readable by whoever can read the run, so it never holds a secret in clear, and a value in clear is refused.
 #
 # THE RULE (for setup-new-instance.yml too): the job that holds the key performs the side effect that consumes the
-# secrets, and branch code never receives the values. A secret that any step of a job references stays in the memory
-# of the runner process for the whole job, where code of the branch (install scripts have sudo) can read it: so
-# INSTALL_SECRETS_PRIVATE_KEY is referenced by the `secrets` job alone, which never checks out or installs anything of
-# the branch.
+# secrets, and branch code is never handed the key or the values. A secret that any step of a job references stays in
+# the memory of the runner process for the whole job, where code of the branch (install scripts have sudo) can read it:
+# so INSTALL_SECRETS_PRIVATE_KEY is referenced by the `secrets` job alone, which never checks out or installs anything
+# of the branch. What this protects is the private key, and with it every envelope ever sent to it. It does not hide
+# the values from the branch: the `install` job holds CONVOX_TOKEN, and with it the branch's code can read the app's
+# variables on the rack. That is accepted: the branch is the code being deployed to that app.
 on:
   workflow_dispatch:
     inputs:
@@ -51,25 +53,29 @@ permissions:
 jobs:
   secrets:
     runs-on: ubuntu-latest
-    outputs:
-      variables: ${{ steps.prepare.outputs.variables }}
     steps:
-      # This repository at the commit the run was dispatched on: the only code this job runs.
-      - uses: actions/checkout@v4
+      # This repository at the commit the run was dispatched on: the only code this job runs. Every download this job
+      # runs code from is pinned (the action to a commit, the CLI to a checksum), since this job holds the key.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      # As contributor.yml: the latest release.
+      # A fixed release, checked against its sha256 (the digest GitHub lists for the asset): this job holds the key, so
+      # it does not run whatever the latest release is. To move to another release, change both.
       - name: Convox CLI
+        env:
+          CONVOX_VERSION: 3.26.0
+          CONVOX_SHA256: 48b4dd0e04da08c2e51881452ab0149e7147c7735d79ce1f161e0e14d6eb4ccc
         run: |
-          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          curl -fsSL --retry 5 --retry-delay 5 -o convox "https://github.com/convox/convox/releases/download/$CONVOX_VERSION/convox-linux"
+          echo "$CONVOX_SHA256  convox" | sha256sum -c -
           sudo install -m 755 convox /usr/local/bin/convox
           rm convox
           convox version
 
       # Checks the inputs, asks GitHub (with the credential of this job) about the branch and the files it needs,
       # opens the envelope, masks every value, then creates the app and sets its variables. The inputs reach the
-      # script through the environment, never through the shell line. Its output is the names of the variables set.
+      # script through the environment, never through the shell line.
       - name: Prepare the app on the rack
         id: prepare
         env:
@@ -140,8 +146,7 @@ jobs:
           convox version
 
       # The inputs reach the script through the environment, never through the shell line: the script checks
-      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env. No key and no value is here:
-      # SECRET_VARIABLES is `set:` and the names of the variables the first job set.
+      # that PRODUCT and ENVIRONMENT make apps/<product>/deploy/<environment>.env. No key and no value is here.
       - name: Install
         env:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
@@ -149,5 +154,4 @@ jobs:
           ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
           ENV_FILE_CONTENT: ${{ inputs.ENV_FILE_CONTENT }}
           CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
-          SECRET_VARIABLES: ${{ needs.secrets.outputs.variables }}
         run: node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
