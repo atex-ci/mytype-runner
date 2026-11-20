@@ -1,5 +1,21 @@
 name: setup-new-instance
 
+# Installs a new MyType instance: the code of GIT_BRANCH (shared/build/boot.sh) creates the instance from the
+# environment file the installer built.
+#
+# ENV_FILE_CONTENT is an envelope (v1.…), encrypted by the installer to a public key: a dispatch input is readable by
+# whoever can read the run, so the file, which holds the passwords and keys of the instance, never travels in it in
+# clear, and a value in clear is refused. The first steps are code of THIS repository (scripts/open-env-file.mjs), run
+# before any code of the branch: they open the envelope, mask every secret of the file and leave what the old flow
+# received (the base64 of the file) in the job's temp folder for the BUILD step. The envelope is bound to
+# `mytype/<ENV_FILE_NAME>`, so one made for another instance opens nowhere else.
+#
+# What this does not hide is the file from the branch: boot.sh and the install scripts of the branch consume the
+# values (they store them in AWS Secrets Manager, create the database and set the Convox app), and the job already
+# holds the credentials of Convox and AWS. The private key is referenced by one step but stays in the memory of the
+# runner process for the whole job, like every secret of the job: install-product.yml keeps it from branch code by
+# giving the key to a job of its own, which is possible there because that job performs the side effect that
+# consumes the values; here the branch performs it.
 on:  
   workflow_dispatch:
     inputs:
@@ -18,7 +34,7 @@ on:
       ENV_FILE_CONTENT:
         type: string
         required: true
-        description: environment file content (JSON stringified)
+        description: 'environment file: the envelope (v1.…) of its base64, encrypted to the install public key'
 
 run-name: >
   setup-new-instance ·
@@ -26,6 +42,9 @@ run-name: >
   ${{ github.event.inputs.GIT_BRANCH != 'main'
       && '[sticky] '
       || '' }}${{ github.event.inputs.GIT_BRANCH }}
+
+permissions:
+  contents: read
 
 jobs:
   main:
@@ -49,6 +68,25 @@ jobs:
       GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
       
     steps:
+      # This repository at the commit the run was dispatched on: the only code that touches the envelope, and it
+      # runs before any code of the branch. The action is pinned to a commit, as in install-product.yml.
+      - name: checkout of this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Opens the envelope, masks every secret, and leaves the base64 of the file where only this user reads it.
+      - name: Open the environment file
+        env:
+          ENVELOPE: ${{ github.event.inputs.ENV_FILE_CONTENT }}
+          INSTALL_SECRETS_PRIVATE_KEY: ${{ secrets.INSTALL_SECRETS_PRIVATE_KEY }}
+          OPENED_FILE: ${{ runner.temp }}/env-file-content
+        run: node scripts/open-env-file.mjs
+
+      # The branch is cloned into the empty workspace, as it always was.
+      - name: Clear the workspace
+        run: find . -mindepth 1 -delete
+
       - name: checkout
         run: |
           pwd
@@ -132,15 +170,10 @@ jobs:
         env:
           JOB_URL: ${{ steps.jobs.outputs.html_url }}
           SALT: ${{ secrets.SALT }}
+          OPENED_FILE: ${{ runner.temp }}/env-file-content
         run: |
-          ENV_FILE_CONTENT=$(jq -r '.inputs.ENV_FILE_CONTENT' "$GITHUB_EVENT_PATH")
-          echo "::add-mask::$ENV_FILE_CONTENT"
-          while IFS='=' read -r key value || [[ -n "$key" ]]; do
-            value=${value%\"}
-            value=${value#\"}
-            if [[ -n "$value" && "$key" =~ (PASSWORD|SECRET|TOKEN|KEY|DSN|CLIENT_ID) ]]; then
-              echo "::add-mask::$value"
-            fi
-          done < <(printf '%s' "$ENV_FILE_CONTENT" | base64 --decode)
+          # What the old flow read from the event: the base64 of the file, opened and masked by the first steps
+          ENV_FILE_CONTENT=$(cat "$OPENED_FILE")
+          rm -f "$OPENED_FILE"
           export ENV_FILE_CONTENT
           ./shared/build/boot.sh "$GIT_BRANCH" "$JOB_URL" "$ENV_FILE_NAME" "$SALT" install
