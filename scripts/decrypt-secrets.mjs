@@ -79,8 +79,11 @@ export const decryptEnvelope = (envelope, privateKeyPem, context) => {
 // a value that holds a literal %25 is masked as %25, not as %.
 const escapeData = (value) => value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')
 
+/** The workflow command that masks `value`, which is not empty. */
+export const maskCommand = (value) => `::add-mask::${escapeData(value)}`
+
 /** The workflow commands that mask the envelope and the value of every KEY=VALUE line of `text`. */
 export const maskCommands = (envelope, text) =>
   [envelope, ...text.split('\n').map((line) => line.replace(/\r$/, '').slice(line.indexOf('=') + 1))]
     .filter((value) => value !== '')
-    .map((value) => `::add-mask::${escapeData(value)}`)
+    .map(maskCommand)
