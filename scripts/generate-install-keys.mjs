@@ -18,11 +18,14 @@ export const SECRET_NAME = 'INSTALL_SECRETS_PRIVATE_KEY'
 
 const gh = (args, input) => spawnSync('gh', args, { input, encoding: 'utf8' })
 
+// A gh that could not start (not installed) has no stderr, only the error spawn reports
+const failure = (result) => result.error?.message ?? result.stderr?.trim()
+
 /** Makes the pair, stores the private key with `run` (gh) and returns the public key. */
 export const generateInstallKeys = ({ run = gh, replace = false } = {}) => {
   const listed = run(['secret', 'list', '-R', REPOSITORY, '--json', 'name', '-q', '.[].name'])
   if (listed.status !== 0) {
-    throw new Error(`gh could not list the secrets of ${REPOSITORY}: ${listed.stderr?.trim()}`)
+    throw new Error(`gh could not list the secrets of ${REPOSITORY}: ${failure(listed)}`)
   }
   if (listed.stdout.split('\n').includes(SECRET_NAME) && !replace) {
     throw new Error(
@@ -33,7 +36,7 @@ export const generateInstallKeys = ({ run = gh, replace = false } = {}) => {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072 })
   const stored = run(['secret', 'set', SECRET_NAME, '-R', REPOSITORY], privateKey.export({ type: 'pkcs8', format: 'pem' }))
   if (stored.status !== 0) {
-    throw new Error(`gh could not set ${SECRET_NAME} in ${REPOSITORY}: ${stored.stderr?.trim()}`)
+    throw new Error(`gh could not set ${SECRET_NAME} in ${REPOSITORY}: ${failure(stored)}`)
   }
   return publicKey.export({ type: 'spki', format: 'der' }).toString('base64')
 }

@@ -57,4 +57,18 @@ describe('generateInstallKeys', () => {
       )
     }
   })
+
+  it('names the reason when gh cannot start, not undefined', () => {
+    for (const step of ['list', 'set']) {
+      const run = (args) =>
+        args[1] === step
+          ? { status: null, error: new Error('spawn gh ENOENT'), stdout: null, stderr: null }
+          : { status: 0, stdout: '\n', stderr: '' }
+
+      assert.throws(
+        () => generateInstallKeys({ run }),
+        (error) => error.message.includes('spawn gh ENOENT') && !error.message.includes('undefined')
+      )
+    }
+  })
 })
