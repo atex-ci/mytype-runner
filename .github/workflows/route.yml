@@ -3,7 +3,8 @@ name: route
 # Every push to atex-products/mytype lands here (its on-push.yml). The router knows no product: it starts
 # the push's test suite once (lint and tests of every project, Nx cached: product agnostic), checks once that
 # the commit message names its Jira ticket, and dispatches the pipeline workflow named after every product
-# the push changes (<product>.yml), handing it the test suite's run id to gate on. A product whose dispatch
+# the push changes (<product>.yml), handing it the test suite's run id: MyType's pipeline gates on it, the
+# others gate on their own projects and only use it to know the run is a push (PMC-6769). A product whose dispatch
 # fails does not stop the others; the run fails at the end.
 # The products come from the Nx graph (shared/build/scripts/products/affected-products.mjs in mytype).
 on:

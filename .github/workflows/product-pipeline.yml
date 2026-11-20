@@ -4,12 +4,17 @@ name: product-pipeline
 # of atex-products/mytype), called by the workflow named after the product (contributor.yml, insights.yml: the name
 # route.yml dispatches and the deploy tool dispatches and reads). The caller owns what a reusable workflow cannot: the
 # dispatch inputs and their defaults, the run's title and its concurrency group; this file is everything else.
-# Gate (the push's test suite, or one started here for a manual deploy), then the deploy the environment file
-# describes. A push deploys (to the product's default environment) only on main; on any other branch the run is the
-# gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
+# Gate, then the deploy the environment file describes. A push deploys (to the product's default environment) only
+# on main; on any other branch the run is the gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to
+# the chosen environment.
+# The gate lints and tests the product's own projects, the ones it is made of and built on
+# (shared/build/scripts/products/projects-of.mjs), and nothing else: a red test of another product does not hold
+# this deploy, and the push's full test suite, which reports and gates MyType, is neither started nor awaited
+# (PMC-6769). A branch older than that script gates as before: it awaits the push's suite (TEST_SUITE_RUN_ID), or
+# starts one for a manual deploy.
 # OPERATION, as in manual-build.yml: `full` (the default, and what a push is) tests then deploys, `deploy` is the
-# plain deploy of a manual run: no suite is started and none awaited, the environment is read and deployed. A run
-# handed a TEST_SUITE_RUN_ID (a push) always awaits it, whatever its OPERATION.
+# plain deploy of a manual run: nothing is tested, the environment is read and deployed. A push (TEST_SUITE_RUN_ID)
+# is always gated, whatever its OPERATION.
 on:
   workflow_call:
     inputs:
@@ -51,7 +56,8 @@ env:
   PRODUCT: ${{ inputs.PRODUCT }}
 
 jobs:
-  # The gate, then which target the environment file names. The job installs nothing from the branch.
+  # The gate, then which target the environment file names. It installs the branch's dependencies to lint and test
+  # the product's projects, as the test suite does: it holds no secret the suite does not hold.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -59,6 +65,9 @@ jobs:
       target: ${{ steps.environment.outputs.target }}
     env:
       GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+      # The Nx remote cache of the suite: a project the push did not change is a cache hit, with the same command
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: ${{ vars.NX_SELF_HOSTED_REMOTE_CACHE_SERVER }}
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ secrets.NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN }}
     steps:
       # Same checkout as route.yml: the commit, even when its branch is already gone.
       - name: checkout
@@ -76,11 +85,95 @@ jobs:
             git checkout -B "$GIT_BRANCH" "$GIT_SHA"
           fi
 
-      # A push arrives with the suite its router started (TEST_SUITE_RUN_ID). A manual deploy has no router run:
-      # it starts the suite itself, as manual-build.yml does, unless it is a plain deploy.
+      # Whether this run is gated (a push always is, a manual deploy unless it is a plain one), and how: on the
+      # product's projects, or, on a branch older than the scripts that do it, on the full test suite.
+      - name: Gate mode
+        id: mode
+        env:
+          GATED: ${{ inputs.TEST_SUITE_RUN_ID != '' || inputs.OPERATION != 'deploy' }}
+        run: |
+          mode=none
+          if [ "$GATED" = true ]; then
+            mode=suite
+            if [ -f shared/build/scripts/products/projects-of.mjs ] && [ -f shared/build/scripts/test-suite/run-tests.sh ]; then
+              mode=projects
+            fi
+          fi
+          echo "gate: $mode"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        if: steps.mode.outputs.mode == 'projects'
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: steps.mode.outputs.mode == 'projects'
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        if: steps.mode.outputs.mode == 'projects'
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        if: steps.mode.outputs.mode == 'projects'
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        if: steps.mode.outputs.mode == 'projects'
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        if: steps.mode.outputs.mode == 'projects'
+        run: pnpm install
+
+      - name: Projects of the product
+        id: projects
+        if: steps.mode.outputs.mode == 'projects'
+        run: |
+          projects=$(node shared/build/scripts/products/projects-of.mjs "$PRODUCT")
+          echo "$PRODUCT: $projects"
+          echo "list=$projects" >> "$GITHUB_OUTPUT"
+
+      # The suite's commands (shared/build/scripts/test-suite/run-tests.sh), on these projects only: the lint, the
+      # check that it left nothing to commit, the tests with coverage and one run without the cache for a failure.
+      - name: Lint
+        if: steps.mode.outputs.mode == 'projects'
+        env:
+          PROJECTS: ${{ steps.projects.outputs.list }}
+        run: bash shared/build/scripts/test-suite/run-tests.sh lint "$PROJECTS"
+
+      - name: Check that lint left no uncommitted files
+        if: steps.mode.outputs.mode == 'projects'
+        run: bash shared/build/scripts/test-suite/run-tests.sh clean-tree
+
+      - name: Tests
+        if: steps.mode.outputs.mode == 'projects'
+        env:
+          PROJECTS: ${{ steps.projects.outputs.list }}
+        run: bash shared/build/scripts/test-suite/run-tests.sh test "$PROJECTS"
+
+      # A branch older than the scripts: a push arrives with the suite its router started (TEST_SUITE_RUN_ID), a
+      # manual deploy starts the suite itself, as manual-build.yml does.
       - name: Start the test suite
         id: test-suite
-        if: inputs.TEST_SUITE_RUN_ID == '' && inputs.OPERATION != 'deploy'
+        if: steps.mode.outputs.mode == 'suite' && inputs.TEST_SUITE_RUN_ID == ''
         env:
           GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
         run: |
@@ -89,7 +182,7 @@ jobs:
           rm test_suite_run_id.txt
 
       - name: Quality gate
-        if: inputs.TEST_SUITE_RUN_ID != '' || inputs.OPERATION != 'deploy'
+        if: steps.mode.outputs.mode == 'suite'
         env:
           TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
         run: bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"

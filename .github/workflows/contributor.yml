@@ -2,13 +2,13 @@ name: contributor
 
 # The pipeline of the contributor portal (apps/contributor of atex-products/mytype). Dispatched by route.yml for a
 # push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
-# GIT_BRANCH, GIT_SHA, ENVIRONMENT, OPERATION). Gate (the push's test suite, or one started here for a manual
-# deploy), then the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
+# GIT_BRANCH, GIT_SHA, ENVIRONMENT, OPERATION). Gate (lint and tests of the product's own projects, PMC-6769),
+# then the deploy the environment file of the product describes: apps/contributor/deploy/<ENVIRONMENT>.env.
 # A push deploys (to the default environment, contributor-dev) only on main; on any other branch the run is the
 # gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
 # OPERATION, as in manual-build.yml: `full` (the default, and what a push is) tests then deploys, `deploy` is the
-# plain deploy of a manual run: no suite is started and none awaited, the environment is read and deployed. A run
-# handed a TEST_SUITE_RUN_ID (a push) always awaits it, whatever its OPERATION.
+# plain deploy of a manual run: nothing is tested, the environment is read and deployed. A run handed a
+# TEST_SUITE_RUN_ID (a push) is always gated, whatever its OPERATION.
 # The steps are product-pipeline.yml's, shared with every product; this file keeps what a reusable workflow cannot own:
 # the dispatch inputs and their defaults, the run's title and the concurrency group.
 on:
@@ -22,7 +22,7 @@ on:
         required: false
         default: ''
       TEST_SUITE_RUN_ID:
-        description: 'test suite run of the push, awaited before the deploy (default: a suite is started here)'
+        description: 'test suite run of the push: set by route.yml, empty for a manual deploy (awaited only by a branch older than the gate of PMC-6769)'
         required: false
         default: ''
       ENVIRONMENT:
@@ -31,7 +31,7 @@ on:
         default: contributor-dev
       OPERATION:
         type: choice
-        description: 'action to perform (full=test & deploy, deploy=plain deploy, without the test suite)'
+        description: 'action to perform (full=test & deploy, deploy=plain deploy, without the tests)'
         required: true
         default: full
         options:

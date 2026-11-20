@@ -34,8 +34,9 @@ on:
 run-name: >
   test-suite-with-coverage · ${{ inputs.GIT_BRANCH }} · ${{ inputs.GIT_SHA }}
 
-# The gate of every product pipeline (route.yml, manual-build.yml or shared/build/scripts/build/index.mjs
-# dispatch it, await.sh waits for it): lint of every project, then the unit tests. It is also the first job of
+# Lint of every project, then the unit tests, on every push (route.yml, manual-build.yml or
+# shared/build/scripts/build/index.mjs dispatch it). It is MyType's gate (await.sh waits for it); the other products
+# gate on their own projects in product-pipeline.yml and never await it (PMC-6769). It is also the first job of
 # sonar-scan.yml, which analyses the coverage this run uploads as the `coverage-lcov` artifact.
 jobs:
   tests:
@@ -142,16 +143,29 @@ jobs:
           JOB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PASSWORD }}" "$JOBS_URL" | jq -r '.jobs[] | select(.name == "${{ github.job }}") | .html_url')
           echo "html_url=$JOB_URL" >> $GITHUB_OUTPUT
 
+      # The lint and the tests are shared/build/scripts/test-suite/run-tests.sh of the branch, the commands below
+      # (the gate of product-pipeline.yml runs them on a product's projects only, PMC-6769). A branch older than
+      # the script runs the same commands inline, as this run always did: the fallback of each step.
+
       # Every project is linted here, whatever product the push changes: a lint failure fails the run, and
-      # with it the pipeline of every product awaiting it. Biome writes its fixes, so a file it had to fix
+      # with it MyType's pipeline, which awaits it. Biome writes its fixes, so a file it had to fix
       # (and left uncommitted) fails the next step, before the tests produce outputs of their own.
       - name: Lint
-        run: npx nx run-many --target=lint --parallel
+        run: |
+          if [ -f shared/build/scripts/test-suite/run-tests.sh ]; then
+            bash shared/build/scripts/test-suite/run-tests.sh lint
+            exit 0
+          fi
+          npx nx run-many --target=lint --parallel
 
       # Nothing else of this run writes a tracked file: the files the deploy build rewrites (prepare-client.sh,
       # the installer's postbuild into docs/) are not touched here, and Nx's terminalOutput is ignored by git.
       - name: Check that lint left no uncommitted files
         run: |
+          if [ -f shared/build/scripts/test-suite/run-tests.sh ]; then
+            bash shared/build/scripts/test-suite/run-tests.sh clean-tree
+            exit 0
+          fi
           if [ -n "$(git status --porcelain)" ]; then
             echo "There are uncommitted changes in the current git repo. Did you forget to lint some source files? Here is the output of 'git status --porcelain':"
             git status --porcelain
@@ -161,6 +175,10 @@ jobs:
 
       - name: Run Tests
         run: |
+          if [ -f shared/build/scripts/test-suite/run-tests.sh ]; then
+            bash shared/build/scripts/test-suite/run-tests.sh test
+            exit 0
+          fi
           echo "🚀 Running tests with cache..."
           
           # Run tests and capture output
