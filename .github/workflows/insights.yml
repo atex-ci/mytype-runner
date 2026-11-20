@@ -1,0 +1,80 @@
+name: insights
+
+# The pipeline of Insights (apps/insights of atex-products/mytype). Dispatched by route.yml for a
+# push that changes the product (inputs GIT_BRANCH, GIT_SHA, TEST_SUITE_RUN_ID) and by the deploy tool (inputs
+# GIT_BRANCH, GIT_SHA, ENVIRONMENT, OPERATION). Gate (the push's test suite, or one started here for a manual
+# deploy), then the deploy the environment file of the product describes: apps/insights/deploy/<ENVIRONMENT>.env.
+# A push deploys (to the default environment, insights-dev) only on main; on any other branch the run is the
+# gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
+# OPERATION, as in manual-build.yml: `full` (the default, and what a push is) tests then deploys, `deploy` is the
+# plain deploy of a manual run: no suite is started and none awaited, the environment is read and deployed. A run
+# handed a TEST_SUITE_RUN_ID (a push) always awaits it, whatever its OPERATION.
+# Same as contributor.yml: the steps are product-pipeline.yml's, this file keeps the dispatch inputs and their
+# defaults, the run's title and the concurrency group.
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'branch to deploy'
+        required: true
+      GIT_SHA:
+        description: 'commit to deploy (default: the tip of the branch)'
+        required: false
+        default: ''
+      TEST_SUITE_RUN_ID:
+        description: 'test suite run of the push, awaited before the deploy (default: a suite is started here)'
+        required: false
+        default: ''
+      ENVIRONMENT:
+        description: 'environment to deploy to: the name of an apps/insights/deploy/<name>.env file'
+        type: string
+        default: insights-dev
+      OPERATION:
+        type: choice
+        description: 'action to perform (full=test & deploy, deploy=plain deploy, without the test suite)'
+        required: true
+        default: full
+        options:
+          - full
+          - deploy
+
+# The deploy tool reads this title: insights · <branch> · <environment> · <commit>. The third part is the
+# environment the run deploys to, or "gate" for a run that deploys nothing (a push to a branch other than main,
+# the condition of the deploy-convox job of product-pipeline.yml), which the tool then does not take for a deploy. A plain deploy
+# is a manual one (no TEST_SUITE_RUN_ID), so it names its environment like any other.
+run-name: >-
+  insights · ${{ inputs.GIT_BRANCH }} · ${{ (inputs.TEST_SUITE_RUN_ID == '' || inputs.GIT_BRANCH == 'main') &&
+  (inputs.ENVIRONMENT || 'insights-dev') || 'gate' }} · ${{ inputs.GIT_SHA }}
+
+# As manual-build.yml (PMC-6646):
+# - a manual deploy: a group of its own (its run id), never cancelled.
+# - a push to main: one group per environment, never cancelled once started, so two deploys to the same
+#   environment never run in parallel; of the ones waiting behind it only the newest is kept.
+# - a push to another branch (the gate alone): one group per branch, a newer push cancels the older one.
+concurrency:
+  group: >-
+    insights-${{ inputs.TEST_SUITE_RUN_ID == '' && github.run_id ||
+    format('{0}-{1}', inputs.GIT_BRANCH, inputs.ENVIRONMENT || 'insights-dev') }}
+  cancel-in-progress: ${{ inputs.TEST_SUITE_RUN_ID != '' && inputs.GIT_BRANCH != 'main' }}
+
+# The caller's permissions are the most the called workflow's jobs can have: its deploy-ecs job is the only one that
+# asks for id-token: write (an OIDC token is minted by a step that has it, and every step of a job runs the branch's
+# code), and it runs only where ECS_ROLE_ARN is given.
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/product-pipeline.yml
+    secrets: inherit
+    with:
+      PRODUCT: insights
+      DEFAULT_ENVIRONMENT: insights-dev
+      GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+      GIT_SHA: ${{ inputs.GIT_SHA }}
+      TEST_SUITE_RUN_ID: ${{ inputs.TEST_SUITE_RUN_ID }}
+      ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
+      OPERATION: ${{ inputs.OPERATION }}

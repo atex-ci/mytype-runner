@@ -1,0 +1,290 @@
+name: product-pipeline
+
+# The pipeline of a product that has an environment file per environment (apps/<PRODUCT>/deploy/<ENVIRONMENT>.env
+# of atex-products/mytype), called by the workflow named after the product (contributor.yml, insights.yml: the name
+# route.yml dispatches and the deploy tool dispatches and reads). The caller owns what a reusable workflow cannot: the
+# dispatch inputs and their defaults, the run's title and its concurrency group; this file is everything else.
+# Gate (the push's test suite, or one started here for a manual deploy), then the deploy the environment file
+# describes. A push deploys (to the product's default environment) only on main; on any other branch the run is the
+# gate alone. A manual deploy (no TEST_SUITE_RUN_ID) deploys any branch to the chosen environment.
+# OPERATION, as in manual-build.yml: `full` (the default, and what a push is) tests then deploys, `deploy` is the
+# plain deploy of a manual run: no suite is started and none awaited, the environment is read and deployed. A run
+# handed a TEST_SUITE_RUN_ID (a push) always awaits it, whatever its OPERATION.
+on:
+  workflow_call:
+    inputs:
+      PRODUCT:
+        description: 'product, as in apps/<product>'
+        type: string
+        required: true
+      DEFAULT_ENVIRONMENT:
+        description: 'environment a run deploys to when it names none: the one a push to main deploys to'
+        type: string
+        required: true
+      GIT_BRANCH:
+        type: string
+        required: true
+      GIT_SHA:
+        type: string
+        default: ''
+      TEST_SUITE_RUN_ID:
+        type: string
+        default: ''
+      ENVIRONMENT:
+        type: string
+        default: ''
+      OPERATION:
+        type: string
+        default: full
+      ECS_ROLE_ARN:
+        description: 'role the ECS deploy assumes (OIDC); empty for a product with no ECS environment'
+        type: string
+        default: ''
+
+# No job has id-token: write but the ECS deploy: a step that has it can mint an OIDC token, and every step of a
+# job runs the branch's code (install scripts, deploy scripts).
+permissions:
+  contents: read
+
+env:
+  ENVIRONMENT: ${{ inputs.ENVIRONMENT || inputs.DEFAULT_ENVIRONMENT }}
+  PRODUCT: ${{ inputs.PRODUCT }}
+
+jobs:
+  # The gate, then which target the environment file names. The job installs nothing from the branch.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      file: ${{ steps.environment.outputs.file }}
+      target: ${{ steps.environment.outputs.target }}
+    env:
+      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+    steps:
+      # Same checkout as route.yml: the commit, even when its branch is already gone.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git config --global http.sslverify false
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
+
+      # A push arrives with the suite its router started (TEST_SUITE_RUN_ID). A manual deploy has no router run:
+      # it starts the suite itself, as manual-build.yml does, unless it is a plain deploy.
+      - name: Start the test suite
+        id: test-suite
+        if: inputs.TEST_SUITE_RUN_ID == '' && inputs.OPERATION != 'deploy'
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+        run: |
+          bash ./shared/build/scripts/test-suite/dispatch.sh
+          echo "run-id=$(cat test_suite_run_id.txt)" >> "$GITHUB_OUTPUT"
+          rm test_suite_run_id.txt
+
+      - name: Quality gate
+        if: inputs.TEST_SUITE_RUN_ID != '' || inputs.OPERATION != 'deploy'
+        env:
+          TEST_SUITE_RUN_ID: ${{ steps.test-suite.outputs.run-id || inputs.TEST_SUITE_RUN_ID }}
+        run: bash ./shared/build/scripts/test-suite/await.sh "$TEST_SUITE_RUN_ID"
+
+      - name: Read the environment
+        id: environment
+        run: |
+          if [[ ! "$ENVIRONMENT" =~ ^[a-z]([a-z0-9-]{0,39}[a-z0-9])$ ]]; then
+            echo "::error::'$ENVIRONMENT' is not an environment name"
+            exit 1
+          fi
+          file="apps/$PRODUCT/deploy/$ENVIRONMENT.env"
+          if [ ! -f "$file" ]; then
+            echo "::error::$file does not exist on this branch"
+            exit 1
+          fi
+          {
+            echo "file=$file"
+            echo "target=$(sed -n 's/^TARGET=//p' "$file")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: ECS is for manual deploys
+        if: steps.environment.outputs.target == 'ecs' && inputs.TEST_SUITE_RUN_ID != ''
+        run: |
+          echo "::error::$ENVIRONMENT is deployed to ECS, from the deploy tool only: a push does not deploy it"
+          exit 1
+
+      - name: ECS needs a role
+        if: steps.environment.outputs.target == 'ecs' && inputs.ECS_ROLE_ARN == ''
+        run: |
+          echo "::error::$PRODUCT has no ECS role: $ENVIRONMENT cannot be deployed to ECS"
+          exit 1
+
+      # The suite of a manual deploy is a run of its own, which the cancellation of this one does not reach.
+      # Only the suite started here: the router's suite is shared with the other products.
+      - name: Stop the test suite
+        if: (failure() || cancelled()) && steps.test-suite.outputs.run-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PASSWORD }}
+          RUN_ID: ${{ steps.test-suite.outputs.run-id }}
+        run: gh run cancel "$RUN_ID" -R "$GITHUB_REPOSITORY" || true
+
+  # A push deploys only from main; a manual deploy from any branch.
+  deploy-convox:
+    needs: gate
+    if: >-
+      needs.gate.outputs.target == 'convox' &&
+      (inputs.TEST_SUITE_RUN_ID == '' || inputs.GIT_BRANCH == 'main')
+    runs-on: ubuntu-latest
+    env:
+      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+    steps:
+      # Same checkout as route.yml: the commit, even when its branch is already gone.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git config --global http.sslverify false
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # The latest release, as the server pipeline downloads it (ensureConvoxCli): the staged build context
+      # of the deploy needs a CLI that matches .dockerignore the corrected way (3.25+).
+      - name: Convox CLI
+        run: |
+          curl -fsSL --retry 5 --retry-delay 5 -o convox https://github.com/convox/convox/releases/latest/download/convox-linux
+          sudo install -m 755 convox /usr/local/bin/convox
+          rm convox
+          convox version
+
+      - name: Deploy
+        env:
+          DEPLOY_ENV_FILE: ${{ needs.gate.outputs.file }}
+          CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
+        run: node shared/build/scripts/products/deploy.mjs "$DEPLOY_ENV_FILE"
+
+  # ECS, from the deploy tool only: a push (it carries its router's TEST_SUITE_RUN_ID) never gets here. The role
+  # is the caller's input (a repository variable), not a value of the branch's environment file, so a branch cannot
+  # pick it.
+  deploy-ecs:
+    needs: gate
+    if: needs.gate.outputs.target == 'ecs' && inputs.TEST_SUITE_RUN_ID == '' && inputs.ECS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
+    steps:
+      # Same checkout as route.yml: the commit, even when its branch is already gone.
+      - name: checkout
+        env:
+          GIT_BRANCH: ${{ inputs.GIT_BRANCH }}
+          GIT_SHA: ${{ inputs.GIT_SHA }}
+          REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
+        run: |
+          git config --global http.sslverify false
+          if [ -z "$GIT_SHA" ]; then
+            git clone --branch "$GIT_BRANCH" "$REPO_URL" .
+          else
+            git clone "$REPO_URL" .
+            git fetch origin "$GIT_SHA"
+            git checkout -B "$GIT_BRANCH" "$GIT_SHA"
+          fi
+
+      # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
+      - name: Resolve Node version
+        id: node-version
+        run: |
+          MIN_NODE=22
+          want=$(tr -dc '0-9.' < .nvmrc 2>/dev/null || true)
+          major=${want%%.*}
+          case "$major" in
+            ''|*[!0-9]*) resolved=$MIN_NODE ;;
+            *) if [ "$major" -lt "$MIN_NODE" ]; then resolved=$MIN_NODE; else resolved=$want; fi ;;
+          esac
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached pnpm dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Region of the environment
+        id: region
+        env:
+          DEPLOY_ENV_FILE: ${{ needs.gate.outputs.file }}
+        run: echo "value=$(sed -n 's/^AWS_REGION=//p' "$DEPLOY_ENV_FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.ECS_ROLE_ARN }}
+          aws-region: ${{ steps.region.outputs.value }}
+
+      - name: Deploy
+        env:
+          DEPLOY_ENV_FILE: ${{ needs.gate.outputs.file }}
+        run: node shared/build/scripts/products/deploy.mjs "$DEPLOY_ENV_FILE"
