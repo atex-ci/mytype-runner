@@ -17,11 +17,22 @@ const fail = (message) => {
   throw new Error(message)
 }
 
-const field = (body, name) =>
-  typeof body[name] === 'string' ? Buffer.from(body[name], 'base64') : fail(`The envelope has no ${name}`)
+const field = (body, name) => {
+  if (typeof body[name] !== 'string') {
+    fail(`The envelope has no ${name}`)
+  }
+  return Buffer.from(body[name], 'base64')
+}
 
-/** The text inside `envelope`, or an Error that says what is wrong with it and never what it holds. */
-export const decryptEnvelope = (envelope, privateKeyPem) => {
+/**
+ * The text inside `envelope`, or an Error that says what is wrong with it and never what it holds. `context` is the
+ * additional authenticated data the installer sealed it with (`<product>/<environment>`): an envelope opens only for
+ * the context it was made for.
+ */
+export const decryptEnvelope = (envelope, privateKeyPem, context) => {
+  if (!context) {
+    fail('The envelope needs a context: the product and the environment it is for')
+  }
   if (!envelope.startsWith(ENVELOPE_PREFIX)) {
     fail(`The value is not an encrypted envelope (${ENVELOPE_PREFIX}…): a value in clear is refused`)
   }
@@ -55,16 +66,21 @@ export const decryptEnvelope = (envelope, privateKeyPem) => {
     )
     const decipher = createDecipheriv('aes-256-gcm', aesKey, iv)
     decipher.setAuthTag(data.subarray(data.length - TAG_BYTES))
+    decipher.setAAD(Buffer.from(context))
     return Buffer.concat([decipher.update(data.subarray(0, data.length - TAG_BYTES)), decipher.final()]).toString(
       'utf8'
     )
   } catch {
-    return fail('The envelope cannot be decrypted: wrong key, or it was altered')
+    fail('The envelope cannot be decrypted: wrong key, another product or environment, or it was altered')
   }
 }
+
+// A workflow command carries its data escaped, as @actions/core writes it: the runner unescapes it before it masks, so
+// a value that holds a literal %25 is masked as %25, not as %.
+const escapeData = (value) => value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')
 
 /** The workflow commands that mask the envelope and the value of every KEY=VALUE line of `text`. */
 export const maskCommands = (envelope, text) =>
   [envelope, ...text.split('\n').map((line) => line.replace(/\r$/, '').slice(line.indexOf('=') + 1))]
     .filter((value) => value !== '')
-    .map((value) => `::add-mask::${value}`)
+    .map((value) => `::add-mask::${escapeData(value)}`)

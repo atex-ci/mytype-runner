@@ -13,7 +13,7 @@ export const pair = () => {
 
 export const b64 = (bytes) => Buffer.from(bytes).toString('base64')
 
-export const encrypt = async (text, publicKey) => {
+export const encrypt = async (text, publicKey, context) => {
   const wrapper = await crypto.subtle.importKey(
     'spki',
     Buffer.from(publicKey, 'base64'),
@@ -23,7 +23,11 @@ export const encrypt = async (text, publicKey) => {
   )
   const aesKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text))
+  const data = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(context) },
+    aesKey,
+    new TextEncoder().encode(text)
+  )
   const key = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, wrapper, await crypto.subtle.exportKey('raw', aesKey))
   return seal({ alg: 'RSA-OAEP-256+A256GCM', key: b64(key), iv: b64(iv), data: b64(data) })
 }

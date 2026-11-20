@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { b64, encrypt, pair } from './envelope-test-helpers.mjs'
-import { createAppLine, parseVariables, prepareApp, shell } from './prepare-app.mjs'
+import { childEnvironment, createAppLine, parseVariables, prepareApp, shell } from './prepare-app.mjs'
 
 const keys = pair()
+const CONTEXT = 'contributor/contributor-test'
 const SECRET = 'client-secret-value'
 const text = `KEYCLOAK_CLIENT_SECRET=${SECRET}\nKEYCLOAK_REALM=réalm\nAUTH_SECRET=generated-secret-value\nAUTH_URL=\n`
 
@@ -40,7 +41,7 @@ case "$1 $2" in
 esac
 `
 
-const rack = ({ apps = {} } = {}) => {
+const rack = ({ apps = {}, timeline = [] } = {}) => {
   const state = mkdtempSync(join(tmpdir(), 'fake-convox-'))
   writeFileSync(join(state, 'convox'), FAKE_CONVOX)
   chmodSync(join(state, 'convox'), 0o755)
@@ -53,8 +54,12 @@ const rack = ({ apps = {} } = {}) => {
   const env = { ...process.env, PATH: `${state}:${process.env.PATH}`, STATE: state, CONVOX_TOKEN: 'test-token' }
   const calls = () => (existsSync(join(state, 'calls')) ? readFileSync(join(state, 'calls'), 'utf8') : '')
   const variables = (app = 'contributor-test') => readFileSync(join(state, `env-${app}`), 'utf8')
-  const io = shell({ env, out: { write: (chunk) => out.push(chunk) }, err: { write: (chunk) => err.push(chunk) } })
-  return { state, calls, variables, out, err, ...io }
+  const io = shell({
+    env,
+    out: { write: (chunk) => (out.push(chunk), timeline.push(['out', chunk])) },
+    err: { write: (chunk) => (err.push(chunk), timeline.push(['err', chunk])) },
+  })
+  return { state, env, calls, variables, out, err, ...io }
 }
 
 const present = ({ branch = true, files = [] } = {}) => ({
@@ -68,20 +73,20 @@ const inputs = async (overrides = {}) => ({
   ENVIRONMENT: 'contributor-test',
   GIT_BRANCH: 'main',
   ENV_FILE_CONTENT: b64(envFileText),
-  ENVELOPE: await encrypt(text, keys.publicKey),
+  ENVELOPE: await encrypt(text, keys.publicKey, CONTEXT),
   INSTALL_SECRETS_PRIVATE_KEY: keys.privateKey,
   ...overrides,
 })
 
-const prepare = async ({ overrides, github = present({ files: manifestFiles }), ...fakeRack } = {}) => {
-  const r = rack(fakeRack)
+const prepare = async ({ overrides, github = present({ files: manifestFiles }), timeline = [], ...fakeRack } = {}) => {
+  const r = rack({ ...fakeRack, timeline })
   const logged = []
   const result = prepareApp({
     env: await inputs(overrides),
     github,
     run: r.run,
     runWithInput: r.runWithInput,
-    log: (line) => logged.push(line),
+    log: (line) => (logged.push(line), timeline.push(['log', line])),
   })
   return { ...r, logged, result }
 }
@@ -132,8 +137,19 @@ describe('prepareApp, on a rack that does not list the app', () => {
     }
   })
 
+  it('prints every mask before anything else: the lines it runs and the output of the rack come after', async () => {
+    const timeline = []
+    const r = await prepare({ timeline })
+
+    await r.result
+    const lastMask = timeline.findLastIndex(([kind]) => kind === 'log')
+    const firstOther = timeline.findIndex(([kind]) => kind !== 'log')
+    assert.ok(lastMask >= 0 && firstOther > lastMask, 'something was printed before the last mask')
+    assert.ok(timeline.every(([kind, line]) => kind !== 'log' || line.startsWith('::add-mask::')))
+  })
+
   it('returns no name when every value is empty', async () => {
-    const r = await prepare({ overrides: { ENVELOPE: await encrypt('AUTH_URL=\n', keys.publicKey) } })
+    const r = await prepare({ overrides: { ENVELOPE: await encrypt('AUTH_URL=\n', keys.publicKey, CONTEXT) } })
 
     assert.deepEqual(await r.result, [])
     assert.equal(r.variables(), 'INSTALLED_PRODUCT=contributor\nAUTH_URL=\n')
@@ -207,7 +223,7 @@ describe('prepareApp, before the rack is touched', () => {
   it('refuses a value in clear, a tampered envelope, the wrong key, without echoing a value', async () => {
     const attempts = [
       { ENVELOPE: b64(text) },
-      { ENVELOPE: `${await encrypt(text, keys.publicKey)}AA` },
+      { ENVELOPE: `${await encrypt(text, keys.publicKey, CONTEXT)}AA` },
       { INSTALL_SECRETS_PRIVATE_KEY: pair().privateKey },
     ]
     for (const overrides of attempts) {
@@ -215,6 +231,16 @@ describe('prepareApp, before the rack is touched', () => {
 
       await assert.rejects(r.result, (error) => !error.message.includes(SECRET))
       assert.equal(r.calls(), '')
+    }
+  })
+
+  it('refuses an envelope sealed for another environment or product, without echoing a value', async () => {
+    for (const sealedFor of ['contributor/contributor-other', 'insights/contributor-test']) {
+      const r = await prepare({ overrides: { ENVELOPE: await encrypt(text, keys.publicKey, sealedFor) } })
+
+      await assert.rejects(r.result, (error) => error.message.includes('another product or environment') && !error.message.includes(SECRET))
+      assert.equal(r.calls(), '')
+      assert.deepEqual(r.logged, [])
     }
   })
 
@@ -228,7 +254,7 @@ describe('prepareApp, before the rack is touched', () => {
       ['A=1\r\nB=this-is-a-secret\r\n', 'VARIABLES line 1 has a carriage return'],
       ['A=1\nthis-is-a-secret', 'VARIABLES line 2 is not KEY=VALUE'],
     ]) {
-      const r = await prepare({ overrides: { ENVELOPE: await encrypt(body, keys.publicKey) } })
+      const r = await prepare({ overrides: { ENVELOPE: await encrypt(body, keys.publicKey, CONTEXT) } })
 
       await assert.rejects(r.result, (error) => error.message === message)
       assert.equal(r.calls(), '')
@@ -247,5 +273,36 @@ describe('createAppLine', () => {
     const line = createAppLine({ rack: 'org/rack', app: 'a', product: "it's" })
 
     assert.ok(line.includes("'INSTALLED_PRODUCT=it'\\''s'"))
+  })
+})
+
+describe('childEnvironment', () => {
+  it('keeps the envelope, the private key and the credential of GitHub from the commands it runs, not the token of Convox', () => {
+    const env = childEnvironment({
+      PATH: '/bin',
+      CONVOX_TOKEN: 'convox-token',
+      ENVELOPE: 'v1.x',
+      INSTALL_SECRETS_PRIVATE_KEY: 'key',
+      GH_PASSWORD: 'github',
+      GH_OWNER: 'atex-ci',
+    })
+
+    assert.deepEqual(env, { PATH: '/bin', CONVOX_TOKEN: 'convox-token', GH_OWNER: 'atex-ci' })
+  })
+
+  it('is what the commands see: a bash of the install finds none of them', async () => {
+    const r = rack()
+    const hidden = childEnvironment({
+      ...r.env,
+      ENVELOPE: 'v1.x',
+      INSTALL_SECRETS_PRIVATE_KEY: 'a-private-key',
+      GH_PASSWORD: 'a-credential',
+    })
+    const out = []
+    const { run } = shell({ env: hidden, out: { write: (chunk) => out.push(chunk) }, err: { write: () => {} } })
+
+    run('env | grep -c -E "^(ENVELOPE|INSTALL_SECRETS_PRIVATE_KEY|GH_PASSWORD)=" || true')
+
+    assert.ok(out.join('').trim().endsWith('0'))
   })
 })

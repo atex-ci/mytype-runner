@@ -137,7 +137,7 @@ export const prepareApp = async ({ env, github, run, runWithInput, log }) => {
   if ((env.INSTALL_SECRETS_PRIVATE_KEY ?? '') === '') {
     fail('INSTALL_SECRETS_PRIVATE_KEY is not set: it is a secret of this repository')
   }
-  const text = decryptEnvelope(envelope, env.INSTALL_SECRETS_PRIVATE_KEY)
+  const text = decryptEnvelope(envelope, env.INSTALL_SECRETS_PRIVATE_KEY, `${product}/${environment}`)
   for (const command of maskCommands(envelope, text)) {
     log(command)
   }
@@ -176,7 +176,10 @@ const githubOf = (env) => {
     if (response.status === 404) {
       return false
     }
-    return response.ok || fail(`GitHub answered ${response.status} about ${what}`)
+    if (!response.ok) {
+      fail(`GitHub answered ${response.status} about ${what}`)
+    }
+    return true
   }
   const encode = (value) => value.split('/').map(encodeURIComponent).join('/')
   return {
@@ -185,9 +188,23 @@ const githubOf = (env) => {
   }
 }
 
+/**
+ * The environment of the commands this script runs (bash, convox): the secrets of this step are for this process alone,
+ * and the credential of GitHub for the calls that ask GitHub. Convox gets its token, which `convox login` reads.
+ */
+export const childEnvironment = (env) => {
+  const { ENVELOPE: _envelope, INSTALL_SECRETS_PRIVATE_KEY: _key, GH_PASSWORD: _password, ...rest } = env
+  return rest
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const names = await prepareApp({ env: process.env, github: githubOf(process.env), ...shell(), log: console.log })
+    const names = await prepareApp({
+      env: process.env,
+      github: githubOf(process.env),
+      ...shell({ env: childEnvironment(process.env) }),
+      log: console.log,
+    })
     // Always "set:", so that an output GitHub drops (it drops one that holds a masked value) is not taken for "none"
     appendFileSync(process.env.GITHUB_OUTPUT, `variables=set:${names.join(',')}\n`)
   } catch (error) {
