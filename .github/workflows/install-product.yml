@@ -3,9 +3,15 @@ name: install-product
 # Installs a new environment of a product on a Convox rack (apps/<PRODUCT>/ of atex-products/mytype), for the
 # installer of the deploy tool. The logic is shared/build/scripts/products/install.mjs of GIT_BRANCH: it adds
 # apps/<PRODUCT>/deploy/<ENVIRONMENT>.env (ENV_FILE_CONTENT, base64, not secret), creates the Convox app, sets
-# VARIABLES (base64 of KEY=VALUE lines, secrets included), deploys once through deploy.mjs, writes the app's URL
+# VARIABLES (an envelope, see below), deploys once through deploy.mjs, writes the app's URL
 # into the file and commits that file to GIT_BRANCH. A failed run changed nothing in the repository and can be run
 # again: an app that exists on the rack is not created twice.
+#
+# VARIABLES is an envelope (v1.…) of the KEY=VALUE lines, encrypted by the installer to a public key: a dispatch input
+# is readable by whoever can read the run, so it never holds a secret in clear, and a value in clear is refused. The
+# first step opens it with scripts/decrypt-secrets.mjs of THIS repository, the only place the private key
+# (INSTALL_SECRETS_PRIVATE_KEY, a secret of this repository) is ever in the environment: the code of the branch being
+# built, which runs after, never sees it. Every value is masked before anything else runs.
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +29,7 @@ on:
         description: 'environment file, base64 (not secret)'
         required: true
       VARIABLES:
-        description: 'runtime variables of the app, base64 of KEY=VALUE lines (secret)'
+        description: 'runtime variables of the app: the envelope (v1.…) of KEY=VALUE lines, encrypted to the install public key'
         required: true
 
 run-name: install · ${{ inputs.PRODUCT }} · ${{ inputs.ENVIRONMENT }} · ${{ inputs.GIT_BRANCH }}
@@ -40,6 +46,22 @@ jobs:
   install:
     runs-on: ubuntu-latest
     steps:
+      # The script is read from this repository at the commit this run was dispatched on, not from the branch.
+      # Masks first, then writes the lines to a file (mode 600) that the Install step reads. The steps after this one run as
+      # the same user, the branch's install scripts among them: they get the values, never the private key.
+      - name: Decrypt the variables
+        env:
+          ENVELOPE: ${{ inputs.VARIABLES }}
+          INSTALL_SECRETS_PRIVATE_KEY: ${{ secrets.INSTALL_SECRETS_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/decrypt-secrets.mjs" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/scripts/decrypt-secrets.mjs?ref=$GITHUB_SHA"
+          node "$RUNNER_TEMP/decrypt-secrets.mjs" --out "$RUNNER_TEMP/install-variables"
+          rm "$RUNNER_TEMP/decrypt-secrets.mjs"
+
       # Same checkout as setup-new-instance.yml: the branch the file is pushed to, with the credential to push.
       - name: checkout
         env:
@@ -47,21 +69,6 @@ jobs:
           REPO_URL: https://${{ github.repository_owner }}:${{ secrets.GH_PASSWORD }}@github.com/atex-products/mytype.git
         run: |
           git clone --branch "$GIT_BRANCH" "$REPO_URL" .
-
-      # Before anything else logs a value: the whole base64 and every value of every line. A masked value that
-      # is short (true, 1) is masked wherever it appears in the log.
-      - name: Mask the variables
-        env:
-          VARIABLES: ${{ inputs.VARIABLES }}
-        run: |
-          echo "::add-mask::$VARIABLES"
-          while IFS= read -r line || [ -n "$line" ]; do
-            line=${line%$'\r'}
-            value=${line#*=}
-            if [ -n "$value" ]; then
-              echo "::add-mask::$value"
-            fi
-          done < <(printf '%s' "$VARIABLES" | base64 --decode)
 
       # Same Node policy as route.yml: .nvmrc, floored at the oldest LTS we build on.
       - name: Resolve Node version
@@ -114,6 +121,7 @@ jobs:
           PRODUCT: ${{ inputs.PRODUCT }}
           ENVIRONMENT: ${{ inputs.ENVIRONMENT }}
           ENV_FILE_CONTENT: ${{ inputs.ENV_FILE_CONTENT }}
-          VARIABLES: ${{ inputs.VARIABLES }}
           CONVOX_TOKEN: ${{ secrets.CONVOX_TOKEN }}
-        run: node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
+        run: |
+          VARIABLES="$(base64 -w0 "$RUNNER_TEMP/install-variables")" \
+            node shared/build/scripts/products/install.mjs "apps/$PRODUCT/deploy/$ENVIRONMENT.env"
