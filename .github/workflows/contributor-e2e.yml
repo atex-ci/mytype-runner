@@ -1,0 +1,115 @@
+# The contributor portal's Playwright suite (apps/contributor/e2e of atex-products/mytype, PMC-6272): the portal's dev
+# server against its own backend, atex-products/atex-contributor (API, Postgres, Keycloak, MailHog), started by the
+# same scripts/dev-stack.sh a developer runs, on an empty database with the demo data. Nothing is kept between runs.
+# Dispatched by route.yml for a push that changes the contributor product (the products of
+# shared/build/scripts/products/affected-products.mjs: a branch is compared with where it left main, so merging main
+# into a branch does not start it), and on demand with an atex-contributor ref to run against. It runs here, not in
+# atex-products/mytype, whose Actions minutes are paid; it gates nothing.
+#
+# The two repositories are checked out side by side, as on a developer's machine (apps/contributor/README.md,
+# "Setup"): dev-stack.sh and the e2e realm reader find atex-contributor next to the monorepo. Both are private, so
+# their checkouts take GH_PASSWORD.
+name: contributor e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      GIT_BRANCH:
+        description: 'mytype branch to test'
+        required: true
+      GIT_SHA:
+        description: 'mytype commit to test (default: the tip of the branch)'
+        required: false
+        default: ''
+      BACKEND_REF:
+        description: 'atex-contributor branch, tag or commit to run the portal against'
+        required: false
+        default: main
+
+run-name: >-
+  contributor e2e · ${{ inputs.GIT_BRANCH }} · ${{ inputs.GIT_SHA }}
+
+permissions:
+  contents: read
+
+# A newer push of the same branch makes the running suite worthless
+concurrency:
+  group: contributor-e2e-${{ inputs.GIT_BRANCH }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # About 5 minutes to start the stack (npm install in the API container, Keycloak's realm import) and 3 of suite
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: mytype
+
+    steps:
+      # The commit when given (route.yml always gives it: its branch may already be gone), else the branch's tip
+      - uses: actions/checkout@v4
+        with:
+          repository: atex-products/mytype
+          ref: ${{ inputs.GIT_SHA || inputs.GIT_BRANCH }}
+          path: mytype
+          token: ${{ secrets.GH_PASSWORD }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: atex-products/atex-contributor
+          ref: ${{ inputs.BACKEND_REF || 'main' }}
+          path: atex-contributor
+          token: ${{ secrets.GH_PASSWORD }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          package_json_file: mytype/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: mytype/.nvmrc
+          cache: pnpm
+          cache-dependency-path: mytype/pnpm-lock.yaml
+
+      - name: install
+        run: |
+          pnpm install --frozen-lockfile
+          npx playwright install --with-deps chromium
+
+      # The portal's .env and the backend's compose.override.yaml (demo data), the backend up and healthy, Keycloak
+      # accepting the dev server's callback on :4000
+      - name: start the backend
+        run: apps/contributor/scripts/dev-stack.sh
+
+      - name: start the portal
+        run: |
+          nohup pnpm --filter contributor dev > "$RUNNER_TEMP/portal.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4000/it)" != 000 ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'The portal did not answer on :4000 within 2 minutes.' >&2
+          tail -60 "$RUNNER_TEMP/portal.log"
+          exit 1
+
+      - name: run the suite
+        run: npx playwright test -c apps/contributor/playwright.config.ts --output "$RUNNER_TEMP/e2e-output" --reporter=line
+
+      - name: logs
+        if: failure()
+        run: |
+          echo '── portal (last 120 lines)'; tail -120 "$RUNNER_TEMP/portal.log" || true
+          echo '── backend (last 120 lines per service)'
+          docker compose --project-directory ../atex-contributor logs --tail 120 contributor-api keycloak || true
+
+      # The trace of every failed test (playwright.config.ts: trace retain-on-failure): `npx playwright show-trace`
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: contributor-e2e-traces
+          path: ${{ runner.temp }}/e2e-output
+          retention-days: 14
