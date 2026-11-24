@@ -129,6 +129,8 @@ jobs:
       # Every product is dispatched even when another one fails; the failures are collected and fail the run at
       # the end. The pipeline workflows are listed once: a product without one is a warning (it has no pipeline
       # yet), while any other answer of GitHub, a 404 of the dispatch included, is a failure.
+      # A product with an e2e suite (<product>-e2e.yml, contributor-e2e.yml) gets it dispatched beside its pipeline,
+      # which it does not gate; a failed dispatch of it is collected like the pipeline's.
       - name: Dispatch the product pipelines
         env:
           PRODUCTS: ${{ steps.products.outputs.list }}
@@ -158,6 +160,18 @@ jobs:
             case "$code" in
               204|200) echo "::notice::$product pipeline dispatched" ;;
               *) echo "::error::dispatch of $product.yml answered $code: $(cat response.json)"; failed="$failed $product" ;;
+            esac
+            if ! jq -e --arg path ".github/workflows/$product-e2e.yml" '.workflows[] | select(.path == $path)' workflows.json > /dev/null; then
+              continue
+            fi
+            payload=$(jq -cn --arg branch "$GIT_BRANCH" --arg sha "$sha" \
+              '{ref: "main", inputs: {GIT_BRANCH: $branch, GIT_SHA: $sha}}')
+            code=$(curl -s -o response.json -w '%{http_code}' -X POST \
+              -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_PASSWORD" \
+              "$API/$product-e2e.yml/dispatches" -d "$payload")
+            case "$code" in
+              204|200) echo "::notice::$product e2e suite dispatched" ;;
+              *) echo "::error::dispatch of $product-e2e.yml answered $code: $(cat response.json)"; failed="$failed $product-e2e" ;;
             esac
           done
           if [ -n "$failed" ]; then
