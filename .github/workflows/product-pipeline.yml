@@ -377,6 +377,32 @@ jobs:
           role-to-assume: ${{ inputs.ECS_ROLE_ARN }}
           aws-region: ${{ steps.region.outputs.value }}
 
+      # Services of the environment that live in other repositories (ECS_COMPANIONS of the environment file, e.g. an
+      # API), deployed before the product with the same script and role: each is cloned at its ref and deployed from
+      # its root with its own environment file. deploy.mjs validates the entries (atex-products repositories only).
+      # An environment file without ECS_COMPANIONS, or a branch older than the key, skips this step.
+      - name: Deploy the companion services
+        env:
+          DEPLOY_ENV_FILE: ${{ needs.gate.outputs.file }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if ! grep -q '^ECS_COMPANIONS=' "$DEPLOY_ENV_FILE"; then
+            echo "No companion services"
+            exit 0
+          fi
+          deploy="$GITHUB_WORKSPACE/shared/build/scripts/products/deploy.mjs"
+          companions=$(node "$deploy" --companions "$DEPLOY_ENV_FILE")
+          n=0
+          while read -r repo ref file; do
+            [ -n "$repo" ] || continue
+            n=$((n + 1))
+            dir="$RUNNER_TEMP/companion-$n"
+            echo "::group::$repo@$ref ($file)"
+            git clone --quiet --depth 1 --branch "$ref" "https://$OWNER:$GH_PASSWORD@github.com/$repo.git" "$dir"
+            (cd "$dir" && git log -1 --format='%H %s' && node "$deploy" "$file")
+            echo "::endgroup::"
+          done <<< "$companions"
+
       - name: Deploy
         env:
           DEPLOY_ENV_FILE: ${{ needs.gate.outputs.file }}
